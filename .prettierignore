@@ -1,0 +1,8 @@
+node_modules
+.next
+dist
+.turbo
+.data
+package-lock.json
+playwright-report
+test-results

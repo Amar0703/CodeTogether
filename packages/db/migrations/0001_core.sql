@@ -1,0 +1,12 @@
+BEGIN;
+CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS users (id uuid PRIMARY KEY, name text NOT NULL, email text NOT NULL UNIQUE, password_hash text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS sessions (token_hash text PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL);
+CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS rooms (id uuid PRIMARY KEY, owner_id uuid NOT NULL REFERENCES users(id), name text NOT NULL, description text NOT NULL DEFAULT '', visibility text NOT NULL DEFAULT 'PRIVATE' CHECK (visibility IN ('PRIVATE','PUBLIC')), created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS room_members (room_id uuid NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, role text NOT NULL CHECK (role IN ('OWNER','EDITOR','VIEWER')), joined_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(room_id,user_id));
+CREATE INDEX IF NOT EXISTS members_user_idx ON room_members(user_id);
+CREATE TABLE IF NOT EXISTS files (id uuid PRIMARY KEY, room_id uuid NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, parent_id uuid, name text NOT NULL, path text NOT NULL, kind text NOT NULL CHECK (kind IN ('FILE','FOLDER')), content text NOT NULL DEFAULT '', version integer NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(room_id,path), UNIQUE(room_id,id), FOREIGN KEY(room_id,parent_id) REFERENCES files(room_id,id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS invites (id uuid PRIMARY KEY, room_id uuid NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, token_hash text NOT NULL UNIQUE, role text NOT NULL CHECK (role IN ('EDITOR','VIEWER')), expires_at timestamptz NOT NULL);
+INSERT INTO schema_migrations(version) VALUES(1) ON CONFLICT DO NOTHING;
+COMMIT;

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "env": [
+        "DATABASE_URL",
+        "PGLITE_DATA_DIR",
+        "APP_ORIGIN",
+        "API_PORT",
+        "API_HOST",
+        "API_URL",
+        "NODE_ENV"
+      ]
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": [".next/**", "!.next/cache/**", "dist/**"],
+      "env": ["API_URL"]
+    },
+    "@codetogether/api#build": { "outputs": [] },
+    "typecheck": { "dependsOn": ["^typecheck"] }
+  }
+}

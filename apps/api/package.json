@@ -1,0 +1,32 @@
+{
+  "name": "@codetogether/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc --noEmit",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "db:migrate": "tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "@codetogether/contracts": "*",
+    "@codetogether/db": "*",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "cookie-parser": "^1.4.7",
+    "express-rate-limit": "^8.1.0",
+    "dotenv": "^17.2.0",
+    "zod": "^4.1.0",
+    "drizzle-orm": "^0.45.3",
+    "tsx": "^4.20.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/cookie-parser": "^1.4.9",
+    "supertest": "^7.1.0",
+    "@types/supertest": "^6.0.0"
+  }
+}
