@@ -76,3 +76,60 @@ export interface RoomDetail {
   members: Member[];
   files: RoomFile[];
 }
+
+export const roomSubscriptionSchema = z.object({ roomId: idSchema }).strict();
+export const chatSendSchema = roomSubscriptionSchema
+  .extend({
+    clientMessageId: idSchema,
+    body: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+export const messageCursorSchema = z
+  .string()
+  .regex(/^[1-9][0-9]{0,18}$/)
+  .refine((value) => BigInt(value) <= 9223372036854775807n);
+export const chatHistorySchema = z
+  .object({
+    before: messageCursorSchema.optional(),
+    after: messageCursorSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+  })
+  .strict()
+  .refine((value) => !(value.before && value.after), 'Use before or after, not both');
+export interface ChatMessage {
+  id: string;
+  sequence: string;
+  roomId: string;
+  clientMessageId: string;
+  sender: { id: string; name: string };
+  body: string;
+  createdAt: string;
+}
+export interface ChatHistory {
+  messages: ChatMessage[];
+  nextCursor: string | null;
+}
+export interface Presence {
+  roomId: string;
+  members: { id: string; name: string; role: Role }[];
+}
+export type RoomEvent = { roomId: string; actorId: string } & (
+  | { type: 'membership.changed'; userId: string }
+  | { type: 'file.changed'; fileId: string; change: 'created' | 'saved' | 'renamed' | 'deleted' }
+  | { type: 'room.updated' }
+  | { type: 'room.deleted' }
+);
+export type RealtimeResult<T> =
+  { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
+export type Ack<T> = (result: RealtimeResult<T>) => void;
+export interface ClientEvents {
+  'room:join': (payload: { roomId: string }, ack: Ack<Presence>) => void;
+  'room:leave': (payload: { roomId: string }, ack: Ack<null>) => void;
+  'chat:send': (payload: z.infer<typeof chatSendSchema>, ack: Ack<ChatMessage>) => void;
+}
+export interface ServerEvents {
+  'presence:update': (presence: Presence) => void;
+  'chat:message': (message: ChatMessage) => void;
+  'room:event': (event: RoomEvent) => void;
+  'room:revoked': (payload: { roomId: string; reason: string }) => void;
+}

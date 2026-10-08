@@ -19,8 +19,11 @@ import {
   memberSchema,
   type Role,
   type User,
+  type RoomEvent,
 } from '@codetogether/contracts';
 import { hashPassword, verifyPassword, hashToken, token } from './security.js';
+import { Realtime, RealtimeError } from './realtime.js';
+import { normalizeOrigin } from './origin.js';
 
 class ApiError extends Error {
   constructor(
@@ -47,8 +50,10 @@ const owner: Role[] = ['OWNER'];
 
 export function createApp(
   db: Database,
-  options: { origin: string; production?: boolean; rateLimit?: number },
+  options: { origin: string; production?: boolean; rateLimit?: number; realtime?: Realtime },
 ) {
+  options = { ...options, origin: normalizeOrigin(options.origin) };
+  const realtime = options.realtime ?? new Realtime(db, options.origin);
   const app = express();
   const cookieName = options.production ? '__Host-ct_session' : 'ct_session';
   const cookieOptions = {
@@ -123,14 +128,18 @@ export function createApp(
       user?.passwordHash ?? `${'0'.repeat(32)}:${'0'.repeat(128)}`,
     );
     if (!user || !valid) fail(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
-    if (req.cookies[cookieName])
+    if (req.cookies[cookieName]) {
       await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(req.cookies[cookieName])));
+      realtime.revokeSession(hashToken(req.cookies[cookieName]));
+    }
     await newSession(user.id, res);
     res.json({ user: publicUser(user) });
   });
   app.post('/api/auth/logout', async (req, res) => {
-    if (req.cookies[cookieName])
+    if (req.cookies[cookieName]) {
       await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(req.cookies[cookieName])));
+      realtime.revokeSession(hashToken(req.cookies[cookieName]));
+    }
     res.clearCookie(cookieName, cookieOptions).status(204).end();
   });
   app.use('/api', async (req, res, next) => {
@@ -144,6 +153,7 @@ export function createApp(
       .where(and(eq(sessions.tokenHash, hashToken(value)), gt(sessions.expiresAt, new Date())));
     if (!record) fail(401, 'UNAUTHENTICATED', 'Your session has expired. Please sign in again.');
     res.locals.user = publicUser(record.user);
+    res.locals.sessionHash = hashToken(value);
     next();
   });
   const uid = (res: Response) => (res.locals.user as User).id;
@@ -165,11 +175,16 @@ export function createApp(
     userId: string,
     allowed: Role[],
     action: (tx: Tx) => Promise<T>,
+    event?: RoomEvent,
   ) {
-    return db.transaction(async (tx) => {
-      await tx.select({ id: rooms.id }).from(rooms).where(eq(rooms.id, roomId)).for('update');
-      await access(tx, roomId, userId, allowed);
-      return action(tx);
+    return realtime.withRoom(roomId, async () => {
+      const result = await db.transaction(async (tx) => {
+        await tx.select({ id: rooms.id }).from(rooms).where(eq(rooms.id, roomId)).for('update');
+        await access(tx, roomId, userId, allowed);
+        return action(tx);
+      });
+      if (event) await realtime.publish(event);
+      return result;
     });
   }
   async function findFile(fileId: string) {
@@ -178,6 +193,12 @@ export function createApp(
     return file;
   }
   app.get('/api/auth/me', (_req, res) => res.json({ user: res.locals.user }));
+  app.post('/api/realtime/ticket', async (_req, res) => {
+    res.json(await realtime.ticket(res.locals.sessionHash));
+  });
+  app.get('/api/rooms/:roomId/messages', async (req, res) => {
+    res.json(await realtime.history(param(req, 'roomId'), uid(res), req.query));
+  });
   app.get('/api/rooms', async (_req, res) => {
     const rows = await db
       .select({ room: rooms, role: members.role })
@@ -227,18 +248,27 @@ export function createApp(
   app.patch('/api/rooms/:roomId', async (req, res) => {
     const roomId = param(req, 'roomId');
     const data = roomSchema.parse(req.body);
-    const [room] = await writeRoom(roomId, uid(res), owner, (tx) =>
-      tx
-        .update(rooms)
-        .set({ ...data, updatedAt: new Date() })
-        .where(eq(rooms.id, roomId))
-        .returning(),
+    const [room] = await writeRoom(
+      roomId,
+      uid(res),
+      owner,
+      (tx) =>
+        tx
+          .update(rooms)
+          .set({ ...data, updatedAt: new Date() })
+          .where(eq(rooms.id, roomId))
+          .returning(),
+      { type: 'room.updated', roomId, actorId: uid(res) },
     );
     res.json({ room: { ...room, role: 'OWNER' } });
   });
   app.delete('/api/rooms/:roomId', async (req, res) => {
     const roomId = param(req, 'roomId');
-    await writeRoom(roomId, uid(res), owner, (tx) => tx.delete(rooms).where(eq(rooms.id, roomId)));
+    await writeRoom(roomId, uid(res), owner, (tx) => tx.delete(rooms).where(eq(rooms.id, roomId)), {
+      type: 'room.deleted',
+      roomId,
+      actorId: uid(res),
+    });
     res.status(204).end();
   });
   app.post('/api/rooms/:roomId/invites', async (req, res) => {
@@ -264,28 +294,48 @@ export function createApp(
       .from(invites)
       .where(and(eq(invites.tokenHash, hashToken(value)), gt(invites.expiresAt, new Date())));
     if (!invite) fail(400, 'INVALID_INVITE', 'This invitation is invalid or has expired.');
-    await db.transaction(async (tx) => {
-      const [room] = await tx.select().from(rooms).where(eq(rooms.id, invite.roomId)).for('update');
-      if (!room) fail(400, 'INVALID_INVITE', 'This room no longer exists.');
-      if (invite.expiresAt.getTime() <= Date.now())
-        fail(400, 'INVALID_INVITE', 'This invitation has expired.');
-      await tx
-        .insert(members)
-        .values({ roomId: invite.roomId, userId: uid(res), role: invite.role })
-        .onConflictDoNothing();
+    await realtime.withRoom(invite.roomId, async () => {
+      await db.transaction(async (tx) => {
+        const [room] = await tx
+          .select()
+          .from(rooms)
+          .where(eq(rooms.id, invite.roomId))
+          .for('update');
+        if (!room) fail(400, 'INVALID_INVITE', 'This room no longer exists.');
+        if (invite.expiresAt.getTime() <= Date.now())
+          fail(400, 'INVALID_INVITE', 'This invitation has expired.');
+        await tx
+          .insert(members)
+          .values({ roomId: invite.roomId, userId: uid(res), role: invite.role })
+          .onConflictDoNothing();
+      });
+      await realtime.publish({
+        type: 'membership.changed',
+        roomId: invite.roomId,
+        userId: uid(res),
+        actorId: uid(res),
+      });
     });
     res.json({ roomId: invite.roomId });
   });
   app.post('/api/rooms/:roomId/join', async (req, res) => {
     const roomId = param(req, 'roomId');
-    await db.transaction(async (tx) => {
-      const [room] = await tx.select().from(rooms).where(eq(rooms.id, roomId)).for('update');
-      if (!room || room.visibility !== 'PUBLIC')
-        fail(404, 'ROOM_NOT_FOUND', 'Public room not found.');
-      await tx
-        .insert(members)
-        .values({ roomId, userId: uid(res), role: 'VIEWER' })
-        .onConflictDoNothing();
+    await realtime.withRoom(roomId, async () => {
+      await db.transaction(async (tx) => {
+        const [room] = await tx.select().from(rooms).where(eq(rooms.id, roomId)).for('update');
+        if (!room || room.visibility !== 'PUBLIC')
+          fail(404, 'ROOM_NOT_FOUND', 'Public room not found.');
+        await tx
+          .insert(members)
+          .values({ roomId, userId: uid(res), role: 'VIEWER' })
+          .onConflictDoNothing();
+      });
+      await realtime.publish({
+        type: 'membership.changed',
+        roomId,
+        userId: uid(res),
+        actorId: uid(res),
+      });
     });
     res.json({ roomId });
   });
@@ -293,59 +343,78 @@ export function createApp(
     const roomId = param(req, 'roomId'),
       userId = param(req, 'userId'),
       data = memberSchema.parse(req.body);
-    await writeRoom(roomId, uid(res), owner, async (tx) => {
-      const [member] = await tx
-        .select()
-        .from(members)
-        .where(and(eq(members.roomId, roomId), eq(members.userId, userId)));
-      if (!member) fail(404, 'MEMBER_NOT_FOUND', 'Member not found.');
-      if (member.role === 'OWNER')
-        fail(400, 'OWNER_PROTECTED', 'The owner role cannot be changed.');
-      await tx
-        .update(members)
-        .set(data)
-        .where(and(eq(members.roomId, roomId), eq(members.userId, userId)));
-    });
+    await writeRoom(
+      roomId,
+      uid(res),
+      owner,
+      async (tx) => {
+        const [member] = await tx
+          .select()
+          .from(members)
+          .where(and(eq(members.roomId, roomId), eq(members.userId, userId)));
+        if (!member) fail(404, 'MEMBER_NOT_FOUND', 'Member not found.');
+        if (member.role === 'OWNER')
+          fail(400, 'OWNER_PROTECTED', 'The owner role cannot be changed.');
+        await tx
+          .update(members)
+          .set(data)
+          .where(and(eq(members.roomId, roomId), eq(members.userId, userId)));
+      },
+      { type: 'membership.changed', roomId, userId, actorId: uid(res) },
+    );
     res.status(204).end();
   });
   app.delete('/api/rooms/:roomId/members/:userId', async (req, res) => {
     const roomId = param(req, 'roomId'),
       userId = param(req, 'userId');
-    await writeRoom(roomId, uid(res), userId === uid(res) ? everyone : owner, async (tx) => {
-      const [member] = await tx
-        .select()
-        .from(members)
-        .where(and(eq(members.roomId, roomId), eq(members.userId, userId)));
-      if (member?.role === 'OWNER')
-        fail(400, 'OWNER_PROTECTED', 'Owners must delete the room instead of leaving.');
-      await tx.delete(members).where(and(eq(members.roomId, roomId), eq(members.userId, userId)));
-    });
+    await writeRoom(
+      roomId,
+      uid(res),
+      userId === uid(res) ? everyone : owner,
+      async (tx) => {
+        const [member] = await tx
+          .select()
+          .from(members)
+          .where(and(eq(members.roomId, roomId), eq(members.userId, userId)));
+        if (member?.role === 'OWNER')
+          fail(400, 'OWNER_PROTECTED', 'Owners must delete the room instead of leaving.');
+        await tx.delete(members).where(and(eq(members.roomId, roomId), eq(members.userId, userId)));
+      },
+      { type: 'membership.changed', roomId, userId, actorId: uid(res) },
+    );
     res.status(204).end();
   });
   app.post('/api/rooms/:roomId/files', async (req, res) => {
     const roomId = param(req, 'roomId'),
       data = createFileSchema.parse(req.body);
-    const file = await writeRoom(roomId, uid(res), writers, async (tx) => {
-      let prefix = '';
-      if (data.parentId) {
-        const [parent] = await tx
-          .select()
-          .from(files)
-          .where(
-            and(eq(files.id, data.parentId), eq(files.roomId, roomId), eq(files.kind, 'FOLDER')),
-          );
-        if (!parent) fail(400, 'INVALID_PARENT', 'Choose a folder in this room.');
-        prefix = parent.path;
-      }
-      if ((prefix.match(/\//g)?.length ?? 0) >= 12)
-        fail(400, 'TREE_TOO_DEEP', 'Folders can be nested up to 12 levels.');
-      const [created] = await tx
-        .insert(files)
-        .values({ ...data, id: randomUUID(), roomId, path: `${prefix}/${data.name}` })
-        .returning();
-      await tx.update(rooms).set({ updatedAt: new Date() }).where(eq(rooms.id, roomId));
-      return created;
-    });
+    const fileId = randomUUID();
+    const file = await writeRoom(
+      roomId,
+      uid(res),
+      writers,
+      async (tx) => {
+        let prefix = '';
+        if (data.parentId) {
+          const [parent] = await tx
+            .select()
+            .from(files)
+            .where(
+              and(eq(files.id, data.parentId), eq(files.roomId, roomId), eq(files.kind, 'FOLDER')),
+            );
+          if (!parent) fail(400, 'INVALID_PARENT', 'Choose a folder in this room.');
+          prefix = parent.path;
+        }
+        if ((prefix.match(/\//g)?.length ?? 0) >= 12)
+          fail(400, 'TREE_TOO_DEEP', 'Folders can be nested up to 12 levels.');
+        const [created] = await tx
+          .insert(files)
+          .values({ ...data, id: fileId, roomId, path: `${prefix}/${data.name}` })
+          .returning();
+        await tx.update(rooms).set({ updatedAt: new Date() }).where(eq(rooms.id, roomId));
+        return created;
+      },
+      { type: 'file.changed', change: 'created', roomId, fileId, actorId: uid(res) },
+    );
     res.status(201).json({ file });
   });
   app.get('/api/files/:fileId', async (req, res) => {
@@ -356,52 +425,86 @@ export function createApp(
   app.patch('/api/files/:fileId', async (req, res) => {
     const original = await findFile(param(req, 'fileId'));
     const data = saveFileSchema.parse(req.body);
-    const file = await writeRoom(original.roomId, uid(res), writers, async (tx) => {
-      const [saved] = await tx
-        .update(files)
-        .set({ content: data.content, version: data.version + 1, updatedAt: new Date() })
-        .where(
-          and(eq(files.id, original.id), eq(files.version, data.version), eq(files.kind, 'FILE')),
-        )
-        .returning();
-      if (!saved)
-        fail(
-          409,
-          'VERSION_CONFLICT',
-          'This file changed since you opened it. Copy your draft, then reload the latest saved version.',
-        );
-      await tx.update(rooms).set({ updatedAt: new Date() }).where(eq(rooms.id, original.roomId));
-      return saved;
-    });
+    const file = await writeRoom(
+      original.roomId,
+      uid(res),
+      writers,
+      async (tx) => {
+        const [saved] = await tx
+          .update(files)
+          .set({ content: data.content, version: data.version + 1, updatedAt: new Date() })
+          .where(
+            and(eq(files.id, original.id), eq(files.version, data.version), eq(files.kind, 'FILE')),
+          )
+          .returning();
+        if (!saved)
+          fail(
+            409,
+            'VERSION_CONFLICT',
+            'This file changed since you opened it. Copy your draft, then reload the latest saved version.',
+          );
+        await tx.update(rooms).set({ updatedAt: new Date() }).where(eq(rooms.id, original.roomId));
+        return saved;
+      },
+      {
+        type: 'file.changed',
+        change: 'saved',
+        roomId: original.roomId,
+        fileId: original.id,
+        actorId: uid(res),
+      },
+    );
     res.json({ file });
   });
   app.patch('/api/files/:fileId/name', async (req, res) => {
     const original = await findFile(param(req, 'fileId'));
     const { name } = renameFileSchema.parse(req.body);
-    await writeRoom(original.roomId, uid(res), writers, async (tx) => {
-      const all = await tx.select().from(files).where(eq(files.roomId, original.roomId));
-      const current = all.find((f) => f.id === original.id);
-      if (!current) fail(404, 'FILE_NOT_FOUND', 'File not found.');
-      const newPath = `${current.path.slice(0, current.path.lastIndexOf('/'))}/${name}`;
-      for (const file of all.filter(
-        (f) => f.id === current.id || f.path.startsWith(`${current.path}/`),
-      )) {
-        await tx
-          .update(files)
-          .set({
-            path: newPath + file.path.slice(current.path.length),
-            ...(file.id === current.id ? { name } : {}),
-            updatedAt: new Date(),
-          })
-          .where(eq(files.id, file.id));
-      }
-    });
+    await writeRoom(
+      original.roomId,
+      uid(res),
+      writers,
+      async (tx) => {
+        const all = await tx.select().from(files).where(eq(files.roomId, original.roomId));
+        const current = all.find((f) => f.id === original.id);
+        if (!current) fail(404, 'FILE_NOT_FOUND', 'File not found.');
+        const newPath = `${current.path.slice(0, current.path.lastIndexOf('/'))}/${name}`;
+        for (const file of all.filter(
+          (f) => f.id === current.id || f.path.startsWith(`${current.path}/`),
+        )) {
+          await tx
+            .update(files)
+            .set({
+              path: newPath + file.path.slice(current.path.length),
+              ...(file.id === current.id ? { name } : {}),
+              updatedAt: new Date(),
+            })
+            .where(eq(files.id, file.id));
+        }
+      },
+      {
+        type: 'file.changed',
+        change: 'renamed',
+        roomId: original.roomId,
+        fileId: original.id,
+        actorId: uid(res),
+      },
+    );
     res.status(204).end();
   });
   app.delete('/api/files/:fileId', async (req, res) => {
     const file = await findFile(param(req, 'fileId'));
-    await writeRoom(file.roomId, uid(res), writers, (tx) =>
-      tx.delete(files).where(eq(files.id, file.id)),
+    await writeRoom(
+      file.roomId,
+      uid(res),
+      writers,
+      (tx) => tx.delete(files).where(eq(files.id, file.id)),
+      {
+        type: 'file.changed',
+        change: 'deleted',
+        roomId: file.roomId,
+        fileId: file.id,
+        actorId: uid(res),
+      },
     );
     res.status(204).end();
   });
@@ -414,7 +517,7 @@ export function createApp(
           message: err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
         },
       });
-    if (err instanceof ApiError)
+    if (err instanceof ApiError || err instanceof RealtimeError)
       return res.status(err.status).json({ error: { code: err.code, message: err.message } });
     const dbError = err as { code?: string; cause?: { code?: string }; status?: number };
     if (dbError.code === '23505' || dbError.cause?.code === '23505')

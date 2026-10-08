@@ -1,10 +1,11 @@
 import 'dotenv/config';
 import { z } from 'zod';
+import { normalizeOrigin } from './origin.js';
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   API_HOST: z.string().default('127.0.0.1'),
   API_PORT: z.coerce.number().int().min(1).max(65535).default(4000),
-  APP_ORIGIN: z.url().default('http://localhost:3000'),
+  APP_ORIGIN: z.url().default('http://localhost:3000').transform(normalizeOrigin),
   DATABASE_URL: z.url().optional(),
   PGLITE_DATA_DIR: z.string().default('../../.data/postgres'),
 });

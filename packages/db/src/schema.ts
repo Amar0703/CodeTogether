@@ -7,6 +7,7 @@ import {
   primaryKey,
   uniqueIndex,
   index,
+  bigserial,
 } from 'drizzle-orm/pg-core';
 
 const createdAt = () => timestamp('created_at', { withTimezone: true }).defaultNow().notNull();
@@ -79,3 +80,25 @@ export const invites = pgTable('invites', {
   role: text().$type<'EDITOR' | 'VIEWER'>().notNull(),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
 });
+
+export const messages = pgTable(
+  'messages',
+  {
+    id: uuid().primaryKey(),
+    sequence: bigserial('sequence', { mode: 'bigint' }).notNull(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+    senderName: text('sender_name').notNull(),
+    clientMessageId: uuid('client_message_id').notNull(),
+    body: text().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex('messages_retry_idx').on(t.roomId, t.userId, t.clientMessageId),
+    uniqueIndex('messages_room_sequence_idx').on(t.roomId, t.sequence),
+  ],
+);

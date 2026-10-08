@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
 import {
@@ -27,6 +27,8 @@ import {
 import type { RoomDetail, RoomFile } from '@codetogether/contracts';
 import { api, ApiError, message } from '../lib/api';
 import { Avatar, ErrorBanner, Loading, Modal } from './ui';
+import { useRoomRealtime } from '../lib/realtime';
+import { Chat } from './chat';
 const Editor = dynamic(() => import('./editor'), { ssr: false, loading: () => <Loading /> });
 type Dialog = 'file' | 'folder' | 'rename' | 'invite' | 'settings' | null;
 export function Workspace({ id }: { id: string }) {
@@ -44,14 +46,23 @@ export function Workspace({ id }: { id: string }) {
   const [invite, setInvite] = useState('');
   const [copied, setCopied] = useState(false);
   const [people, setPeople] = useState(true);
+  const [accessRemoved, setAccessRemoved] = useState(false);
   const dirty = !!active && draft !== active.content;
-  const canEdit = detail?.room.role !== 'VIEWER';
-  const isOwner = detail?.room.role === 'OWNER';
+  const canEdit = !!detail && !accessRemoved && detail.room.role !== 'VIEWER';
+  const isOwner = !accessRemoved && detail?.room.role === 'OWNER';
+  const refreshSequence = useRef(0);
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     const result = await api<RoomDetail>(`/rooms/${id}`);
-    setDetail(result);
+    if (sequence === refreshSequence.current) setDetail(result);
     return result;
   }, [id]);
+  const realtime = useRoomRealtime(id, !!detail, refresh, (reason) => {
+    setAccessRemoved(true);
+    setError(`${reason} Your open draft is still available to download.`);
+  });
+  const latestActive = detail?.files.find((file) => file.id === active?.id);
+  const remoteChange = active && (!latestActive || latestActive.version !== active.version);
   useEffect(() => {
     refresh()
       .then((result) => {
@@ -314,10 +325,18 @@ export function Workspace({ id }: { id: string }) {
           </span>
         </div>
         <span className="role-badge">{detail.room.role.toLowerCase()}</span>
+        <span
+          className={`connection-state ${realtime.status === 'Connected' ? 'connected' : ''}`}
+          role="status"
+        >
+          <span className="status-dot" />
+          {realtime.status}
+        </span>
         <div className="studio-actions">
           <button
             className={`button small ${people ? 'pressed' : ''}`}
             aria-label="Toggle members"
+            title="Members and chat"
             onClick={() => setPeople(!people)}
           >
             <Users size={16} />
@@ -452,7 +471,15 @@ export function Workspace({ id }: { id: string }) {
             <span>{canEdit ? 'Ctrl / ⌘ + S to save' : 'Viewer · read-only'}</span>
           </div>
           <ErrorBanner error={error} />
-          {error.includes('changed since') && (
+          {remoteChange && !accessRemoved && (
+            <div className="remote-notice" role="status">
+              {latestActive
+                ? 'A newer saved version is available.'
+                : 'This file was deleted from the room.'}{' '}
+              Your open draft is unchanged. Use Refresh files when ready.
+            </div>
+          )}
+          {(dirty || error.includes('changed since') || accessRemoved) && (
             <div className="conflict-actions">
               <button
                 className="button small"
@@ -521,61 +548,70 @@ export function Workspace({ id }: { id: string }) {
                 <X size={15} />
               </button>
             </div>
-            <p className="panel-hint">The people who share this space.</p>
-            {detail.members.map((member) => (
-              <div className="member" key={member.id}>
-                <div className="member-info">
-                  <Avatar name={member.name} small />
-                  <div>
-                    <strong>{member.name}</strong>
-                    <span>{member.role.toLowerCase()}</span>
+            <div className="member-roster">
+              <p className="panel-hint" data-testid="online-count">
+                {realtime.status === 'Connected'
+                  ? `${realtime.online.length} online now`
+                  : 'Presence unavailable while disconnected'}
+              </p>
+              {detail.members.map((member) => (
+                <div className="member" key={member.id}>
+                  <div className="member-info">
+                    <Avatar name={member.name} small />
+                    <div>
+                      <strong>{member.name}</strong>
+                      <span
+                        className={`member-presence ${realtime.online.some((person) => person.id === member.id) ? 'online' : ''}`}
+                      >
+                        {realtime.status !== 'Connected'
+                          ? 'Unknown'
+                          : realtime.online.some((person) => person.id === member.id)
+                            ? 'Online'
+                            : 'Offline'}
+                      </span>
+                      <span>{member.role.toLowerCase()}</span>
+                    </div>
                   </div>
+                  {isOwner && member.role !== 'OWNER' && (
+                    <div className="member-controls">
+                      <select
+                        aria-label={`Role for ${member.name}`}
+                        value={member.role}
+                        disabled={busy}
+                        onChange={(e) => void memberAction(member.id, e.target.value)}
+                      >
+                        <option value="EDITOR">Editor</option>
+                        <option value="VIEWER">Viewer</option>
+                      </select>
+                      <button
+                        className="icon-button danger-text"
+                        aria-label={`Remove ${member.name}`}
+                        disabled={busy}
+                        onClick={() => {
+                          if (window.confirm(`Remove ${member.name} from this room?`))
+                            void memberAction(member.id);
+                        }}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  )}
                 </div>
-                {isOwner && member.role !== 'OWNER' && (
-                  <div className="member-controls">
-                    <select
-                      aria-label={`Role for ${member.name}`}
-                      value={member.role}
-                      disabled={busy}
-                      onChange={(e) => void memberAction(member.id, e.target.value)}
-                    >
-                      <option value="EDITOR">Editor</option>
-                      <option value="VIEWER">Viewer</option>
-                    </select>
-                    <button
-                      className="icon-button danger-text"
-                      aria-label={`Remove ${member.name}`}
-                      disabled={busy}
-                      onClick={() => {
-                        if (window.confirm(`Remove ${member.name} from this room?`))
-                          void memberAction(member.id);
-                      }}
-                    >
-                      <X size={13} />
-                    </button>
-                  </div>
-                )}
+              ))}
+              {isOwner && (
+                <button className="invite-outline" onClick={() => showDialog('invite')}>
+                  <UserPlus size={16} /> Invite someone
+                </button>
+              )}
+              <div className="room-description">
+                <span className="eyebrow">ABOUT THIS ROOM</span>
+                <p>
+                  {detail.room.description ||
+                    'A shared space to work through ideas, one line at a time.'}
+                </p>
               </div>
-            ))}
-            {isOwner && (
-              <button className="invite-outline" onClick={() => showDialog('invite')}>
-                <UserPlus size={16} /> Invite someone
-              </button>
-            )}
-            <div className="room-description">
-              <span className="eyebrow">ABOUT THIS ROOM</span>
-              <p>
-                {detail.room.description ||
-                  'A shared space to work through ideas, one line at a time.'}
-              </p>
             </div>
-            <div className="manual-note">
-              <RefreshCw size={16} />
-              <p>
-                Use refresh to load your team’s latest saved files. Live editing is coming in a
-                later phase.
-              </p>
-            </div>
+            <Chat realtime={realtime} />
             {!isOwner && (
               <button
                 className="button small leave-button"

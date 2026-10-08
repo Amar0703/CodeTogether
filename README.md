@@ -1,6 +1,6 @@
 # CodeTogether
 
-A shared coding workspace built from Phase 1 of the project blueprint. Two authenticated users can join the same room, open the same persisted files, and work in a syntax-highlighted editor with explicit save and refresh controls.
+A shared coding workspace implementing Phases 1 and 2 of the project blueprint. Authenticated room members see presence, persistent chat, membership and file events without refreshing. The editor retains explicit save/load and optimistic conflict protection.
 
 ## Run locally
 
@@ -51,9 +51,19 @@ Public rooms require a signed-in account. Anyone with a public room link can joi
 3. Open a separate browser profile or private window, follow the link, create another account, and accept the invitation.
 4. Save changes as either account. Click **Refresh files** in the other browser to load them.
 5. Reload the page and restart the server to confirm persistence.
-6. Give the second account Viewer access, refresh its room, and verify it cannot edit. The API enforces role changes immediately, even before refresh.
+6. Give the second account Viewer access and verify its editor becomes read-only without refreshing. Unsaved drafts remain downloadable.
 
-There is no live synchronization in Phase 1. If both accounts edit the same saved version, the second save is rejected. Download or copy that draft, reload the latest file, and merge manually.
+File events update the explorer and announce newer saved versions without replacing the open draft. If both accounts edit the same saved version, the second save is rejected. Download or copy that draft, reload the latest file, and merge manually.
+
+## Phase 2 realtime rooms
+
+- Socket.IO runs alongside Express on the existing Render service. Vercel's authenticated API proxy issues single-use, 30-second tickets for direct WebSocket authentication.
+- Online presence counts users across tabs, with heartbeat cleanup and fresh authorization on reconnect.
+- Chat persists in PostgreSQL/PGlite, supports cursor history, acknowledgments, visible send failures, and safe retry without duplicate records.
+- Room membership and file changes emit shared typed events. Removing a member revokes all their subscribed tabs immediately.
+- Strict origin checks, session revalidation, payload bounds and per-user event limits apply on the server. Viewers may chat; they cannot save files.
+
+Local development uses `http://localhost:4000` for WebSockets. For production, set `NEXT_PUBLIC_REALTIME_URL` on Vercel before building. See [Phase 2 deployment and acceptance](docs/phase-2.md) for exact Render/Vercel settings, event contracts and limitations.
 
 ## Commands and checks
 
@@ -80,6 +90,6 @@ docs              Architecture, API reference, phase status and deployment
 tests             Two-browser-context acceptance test
 ```
 
-See [architecture](docs/architecture.md), [API](docs/api.md), and [Phase 1 status and deployment](docs/phase-1.md).
+See [architecture](docs/architecture.md), [API](docs/api.md), [Phase 1 history](docs/phase-1.md), and [Phase 2 deployment and acceptance](docs/phase-2.md).
 
-Realtime presence/chat, simultaneous collaborative editing, WebRTC, code execution, queues, and version history belong to later blueprint phases. The editor stores the current file snapshot and a concurrency version, not a historical timeline.
+Simultaneous collaborative editing, live cursors, WebRTC, code execution, queues, and version history remain deferred. The editor stores the current file snapshot and a concurrency version, not a historical timeline.

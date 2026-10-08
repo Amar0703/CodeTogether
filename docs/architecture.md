@@ -1,4 +1,4 @@
-# Phase 1 architecture
+# CodeTogether architecture
 
 The browser loads a Next.js app and calls `/api` on the same origin. Next.js proxies requests to the Express service. Express authenticates a session, validates requests with shared Zod schemas, checks room membership, and reads or updates PostgreSQL through Drizzle.
 
@@ -6,6 +6,7 @@ The browser loads a Next.js app and calls `/api` on the same origin. Next.js pro
 flowchart LR
   Browser[Browser / CodeMirror] --> Web[Next.js :3000]
   Web -->|same-origin API proxy| API[Express :4000]
+  Browser -->|ticket-authenticated WebSocket| API
   API --> Contracts[Shared Zod contracts]
   API --> DB[(PostgreSQL)]
 ```
@@ -14,7 +15,7 @@ flowchart LR
 
 `users` owns profile information and password hashes. `sessions` stores only token hashes with seven-day expiry. `rooms` and `room_members` store ownership, roles and membership. `files` stores the tree, current content and version. `invites` stores a token hash, expiry and assigned role. UUIDs are generated in the application.
 
-The SQL migration adds foreign keys and uniqueness constraints for emails, room memberships and file paths. Composite room/parent foreign keys prevent cross-room file trees and cascade folder deletion. Drizzle defines the query types; `packages/db/migrations/0001_core.sql` is the executable migration. Development runs the idempotent initial migration on startup. Production migrations are an explicit deployment step. Add new numbered migrations and a runner before evolving the schema beyond this initial release.
+The SQL migrations add foreign keys and uniqueness constraints for emails, room memberships and file paths. Composite room/parent foreign keys prevent cross-room file trees and cascade folder deletion. The runner executes numbered, idempotent SQL files in lexical order on one connection; each file has its own transaction and records its version. Migration `0002_chat.sql` adds messages, monotonic sequence cursors and retry uniqueness. Development migrates on startup; production runs `npm run db:migrate` explicitly before starting the service. New migrations must remain idempotent because the runner replays them.
 
 ## Permissions and concurrency
 
@@ -36,4 +37,14 @@ PGlite provides a local PostgreSQL runtime using the same SQL migration and quer
 
 ## Client behavior
 
-Room state is loaded on entry or explicit refresh. File content is fetched again when switching files. Unsaved drafts stay in memory and warn before switching files, using in-app back navigation, or closing/reloading the page. Browser/process crashes can still lose unsaved drafts; save explicitly. There is no background polling, realtime transport or executable-code service in this phase.
+Room state is loaded on entry, explicit refresh, server events and reconnect. These background refreshes update room metadata, roles and the explorer, but never replace the open editor buffer or its base version. The UI announces a newer saved version or deleted file; explicit refresh retains the discard confirmation. File content is fetched when switching files. Drafts remain in memory and downloadable even after demotion/removal; browser crashes can lose them. There is no collaborative document transport or executable-code service.
+
+## Realtime boundary
+
+The Express HTTP server also hosts Socket.IO, using WebSocket transport only. A CSRF-protected same-origin POST exchanges the HttpOnly session for a random single-use ticket held in memory for 30 seconds. The browser sends that ticket in the Socket.IO auth packet, never in a query string; it never reads or forwards the session cookie itself. The Render endpoint rejects absent/foreign Origin headers, consumes the ticket atomically, and looks up its linked session in PostgreSQL. No shared signing secret or third-party service is added.
+
+A process-local room queue wraps HTTP mutations, subscriptions, sends, revocations and broadcasts. Database row locks still serialize mutations; the queue also orders post-commit event delivery with access changes. Every socket action and recipient rechecks current session/membership. An idle sweep rechecks sessions and memberships every 15 seconds. Expired sessions disconnect; normal logout/rotation disconnects their sockets immediately. Presence derives from all authorized connected sockets and deduplicates by server-side user ID.
+
+Chat commits before broadcast/ack. The database unique key `(room_id, user_id, client_message_id)` makes acknowledgment-loss retries idempotent. A conflicting body under the same key is rejected. A monotonic database sequence avoids timestamp cursor ambiguity. Reconnect uses a fresh ticket, rejoins with current permissions, fetches messages after the last known sequence, and reloads room metadata without touching drafts. Room events are invalidations, not a durable event log; PostgreSQL is the recovery source.
+
+Use one realtime instance until a shared ticket store, distributed coordination/limits and Socket.IO adapter are introduced. See [contracts, limits and deployment](phase-2.md).

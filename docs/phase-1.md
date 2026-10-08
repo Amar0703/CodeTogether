@@ -1,5 +1,7 @@
 # Phase 1 status and deployment
 
+This is the historical Phase 1 verification record. The current realtime architecture and Vercel + Render + Neon deployment instructions are in [Phase 2](phase-2.md). Historical deployment status below is not evidence of current deployed acceptance.
+
 The implementation covers authentication, dashboard, room CRUD, membership, invitations, file/folder operations, CodeMirror, persistence, and basic permissions. API integration tests exercise two-account access, conflict prevention, authorization, authentication, expiry, and cascade behavior. The browser acceptance test exercises signup, a shared room, saving, refresh persistence, nested files and a viewer account.
 
 ## Local verification

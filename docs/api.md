@@ -1,4 +1,4 @@
-# Phase 1 API
+# CodeTogether API
 
 All paths start with `/api`. JSON responses use `{ error: { code, message } }` on failure. Unsafe requests require `Content-Type: application/json` when a body is sent and `X-CodeTogether: 1`. Browser requests use the Next.js same-origin proxy. Authenticate with the returned session cookie.
 
@@ -30,3 +30,11 @@ Visibility is `PRIVATE` or `PUBLIC`. Role is `OWNER`, `EDITOR`, or `VIEWER`; inv
 Important error codes: `UNAUTHENTICATED`, `INVALID_CREDENTIALS`, `EMAIL_TAKEN`, `FORBIDDEN`, `ROOM_NOT_FOUND`, `FILE_NOT_FOUND`, `INVALID_INVITE`, `INVALID_ORIGIN`, `INVALID_PARENT`, `TREE_TOO_DEEP`, `OWNER_PROTECTED`, `ALREADY_EXISTS`, `VERSION_CONFLICT`, `VALIDATION_ERROR`, `RATE_LIMITED`.
 
 Invites are reusable until expiry and never change an existing member's role. Revoking invite links, limiting uses and listing outstanding invitations are future hardening work. To remove access permanently today, keep the room private and remember that a removed member can rejoin using a still-valid invitation they possess.
+
+## Phase 2 additions
+
+`POST /api/realtime/ticket` issues a single-use, 30-second Socket.IO credential through the authenticated same-origin proxy. It requires the same CSRF header/origin checks as other unsafe requests.
+
+`GET /api/rooms/:roomId/messages?limit=50&before=<sequence>` returns chronological chat history and `nextCursor`. Use `after=<sequence>` for forward reconnect catch-up; do not combine both cursors. Membership is required; limits are 1–100 messages per page.
+
+See [Phase 2 contracts](phase-2.md#shared-contracts) for socket events, acknowledgments, delivery semantics, authorization and limits.

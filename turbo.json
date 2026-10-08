@@ -11,13 +11,14 @@
         "API_PORT",
         "API_HOST",
         "API_URL",
+        "NEXT_PUBLIC_REALTIME_URL",
         "NODE_ENV"
       ]
     },
     "build": {
       "dependsOn": ["^build"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"],
-      "env": ["API_URL"]
+      "env": ["API_URL", "NEXT_PUBLIC_REALTIME_URL"]
     },
     "@codetogether/api#build": { "outputs": [] },
     "typecheck": { "dependsOn": ["^typecheck"] }

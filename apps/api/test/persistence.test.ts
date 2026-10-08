@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
-import { connectDatabase, users } from '@codetogether/db';
+import { connectDatabase, users, rooms, messages } from '@codetogether/db';
 
 test('local database creates nested directories and survives a connection restart', async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'codetogether-test-'));
@@ -12,19 +12,36 @@ test('local database creates nested directories and survives a connection restar
   let connection = await connectDatabase(undefined, directory);
   try {
     await connection.migrate();
+    const userId = randomUUID(),
+      roomId = randomUUID(),
+      messageId = randomUUID();
+    await connection.db.insert(users).values({
+      id: userId,
+      name: 'Persistent user',
+      email: 'persist@example.com',
+      passwordHash: 'test-only-hash',
+    });
     await connection.db
-      .insert(users)
+      .insert(rooms)
+      .values({ id: roomId, ownerId: userId, name: 'Persistent chat' });
+    await connection.db
+      .insert(messages)
       .values({
-        id: randomUUID(),
-        name: 'Persistent user',
-        email: 'persist@example.com',
-        passwordHash: 'test-only-hash',
+        id: messageId,
+        roomId,
+        userId,
+        senderName: 'Persistent user',
+        clientMessageId: randomUUID(),
+        body: 'Survives a database restart',
       });
     await connection.close();
     connection = await connectDatabase(undefined, directory);
     await connection.migrate();
     const saved = await connection.db.select().from(users);
     assert.equal(saved[0].name, 'Persistent user');
+    const chat = await connection.db.select().from(messages);
+    assert.equal(chat[0].id, messageId);
+    assert.equal(chat[0].body, 'Survives a database restart');
   } finally {
     await connection.close();
     const resolved = resolve(temporaryRoot);
