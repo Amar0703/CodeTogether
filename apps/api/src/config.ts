@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { z } from 'zod';
 import { normalizeOrigin } from './origin.js';
+import { iceEnvironmentSchema } from './ice.js';
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   API_HOST: z.string().default('127.0.0.1'),
@@ -10,6 +11,7 @@ const schema = z.object({
   PGLITE_DATA_DIR: z.string().default('../../.data/postgres'),
 });
 export const config = schema.parse(process.env);
+export const iceSettings = iceEnvironmentSchema.parse(process.env);
 if (
   config.NODE_ENV === 'production' &&
   (!config.DATABASE_URL || !config.APP_ORIGIN.startsWith('https://'))

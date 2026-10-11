@@ -20,10 +20,19 @@ import {
   documentUpdateSchema,
   documentAwarenessSchema,
   type DocumentPeer,
+  callJoinSchema,
+  callCancelSchema,
+  callSessionSchema,
+  callStateSchema,
+  callSignalSchema,
+  MAX_CALL_PARTICIPANTS,
+  type CallParticipant,
+  type CallSnapshot,
 } from '@codetogether/contracts';
 import { hashToken, token } from './security.js';
 import { normalizeOrigin } from './origin.js';
 import { DocumentStore } from './documents.js';
+import { iceEnvironmentSchema, issueIce, type IceSettings } from './ice.js';
 
 export class RealtimeError extends Error {
   constructor(
@@ -39,6 +48,13 @@ type Identity = {
   name: string;
   sessionHash: string;
   roomId?: string;
+  cancelledCalls?: Set<string>;
+  call?: {
+    callId: string;
+    joinId: string;
+    participant: CallParticipant;
+    sequences: Map<string, number>;
+  };
   document?: { fileId: string; clientId: number; cursor: DocumentPeer['cursor']; seen: number };
 };
 type RoomSocket = Socket<ClientEvents, ServerEvents, Record<string, never>, Identity>;
@@ -62,6 +78,7 @@ export class Realtime {
   private queued = 0;
   private timer?: ReturnType<typeof setInterval>;
   private sweeping = false;
+  private calls = new Map<string, { id: string; revision: number }>();
   readonly origin: string;
   private documents: DocumentStore;
   constructor(
@@ -73,6 +90,7 @@ export class Realtime {
       pingInterval?: number;
       pingTimeout?: number;
       actionLimit?: number;
+      iceSettings?: IceSettings;
     } = {},
   ) {
     this.origin = normalizeOrigin(origin);
@@ -124,6 +142,25 @@ export class Realtime {
     const expiresAt = Date.now() + (this.options.ticketTtlMs ?? 30_000);
     this.tickets.set(hashToken(value), { sessionHash, expiresAt });
     return { ticket: value, expiresAt: new Date(expiresAt).toISOString() };
+  }
+  async ice(roomId: string, sessionHash: string) {
+    return this.withRoom(roomId, async () => {
+      const identity = await this.session(sessionHash);
+      await this.membership(this.db, roomId, identity.userId);
+      this.rate(`ice:${identity.userId}`, 12);
+      return issueIce(this.options.iceSettings ?? iceEnvironmentSchema.parse({}));
+    });
+  }
+  private callSnapshot(roomId: string, sockets: RoomSocket[]): CallSnapshot | undefined {
+    const call = this.calls.get(roomId);
+    if (!call) return;
+    const participants = sockets
+      .filter((s) => s.data.call?.callId === call.id)
+      .map((s) => s.data.call!.participant);
+    const snapshot = { roomId, callId: call.id, revision: ++call.revision, participants };
+    for (const s of sockets) s.emit('call:snapshot', snapshot);
+    if (!participants.length) this.calls.delete(roomId);
+    return snapshot;
   }
   revokeSession(sessionHash: string) {
     for (const [key, value] of this.tickets)
@@ -182,6 +219,11 @@ export class Realtime {
       // Includes unknown packets; limits are shared across this user's tabs.
       socket.use((packet, next) => {
         try {
+          if (typeof packet[0] === 'string' && packet[0].startsWith('call:')) {
+            this.rate(`callpackets:${socket.data.userId}`, 600);
+            next();
+            return;
+          }
           const documentPacket = ['doc:join', 'doc:update', 'doc:leave', 'doc:awareness'].includes(
             packet[0],
           );
@@ -191,6 +233,18 @@ export class Realtime {
           );
           next();
         } catch {
+          if (typeof packet[0] === 'string' && packet[0].startsWith('call:')) {
+            const ack = packet.at(-1);
+            if (typeof ack === 'function')
+              ack({
+                ok: false,
+                error: {
+                  code: 'RATE_LIMITED',
+                  message: 'Call event limit reached. Leave and retry shortly.',
+                },
+              });
+            return; // A media flood must not disconnect document/chat transport.
+          }
           socket.disconnect(true);
         }
       });
@@ -234,6 +288,141 @@ export class Realtime {
           );
         return member;
       };
+      const callAccess = async (roomId: string, callId?: string, participantId?: string) => {
+        await this.session(socket.data.sessionHash);
+        await this.membership(this.db, roomId, socket.data.userId);
+        if (!socket.connected || socket.data.roomId !== roomId)
+          throw new RealtimeError('NOT_SUBSCRIBED', 'Join this room first.');
+        if (
+          callId &&
+          (socket.data.call?.callId !== callId || socket.data.call.participant.id !== participantId)
+        )
+          throw new RealtimeError('STALE_CALL', 'This call participation has ended. Join again.');
+      };
+      socket.on('call:join', (payload, ack) =>
+        handle(ack, async () => {
+          const data = callJoinSchema.parse(payload);
+          this.rate(`calljoin:${socket.data.userId}`, 20);
+          return this.withRoom(data.roomId, async () => {
+            await callAccess(data.roomId);
+            const sockets = await this.authorizedSockets(data.roomId);
+            if (
+              !socket.connected ||
+              socket.data.roomId !== data.roomId ||
+              socket.data.cancelledCalls?.has(data.joinId)
+            )
+              throw new RealtimeError('STALE_CALL', 'This join attempt has ended.');
+            if (socket.data.call && socket.data.call.joinId !== data.joinId)
+              throw new RealtimeError('ALREADY_IN_CALL', 'Leave this call before joining again.');
+            if (!socket.data.call) {
+              if (sockets.filter((s) => s.data.call).length >= MAX_CALL_PARTICIPANTS)
+                throw new RealtimeError(
+                  'CALL_FULL',
+                  'This call has four participants. Try again when a place is free.',
+                );
+              let call = this.calls.get(data.roomId);
+              if (!call) {
+                if (this.calls.size >= 1000)
+                  throw new RealtimeError('UNAVAILABLE', 'Call service is busy.');
+                call = { id: randomUUID(), revision: 0 };
+                this.calls.set(data.roomId, call);
+              }
+              socket.data.call = {
+                callId: call.id,
+                joinId: data.joinId,
+                sequences: new Map(),
+                participant: {
+                  id: randomUUID(),
+                  userId: socket.data.userId,
+                  name: socket.data.name,
+                  media: data.media,
+                },
+              };
+            }
+            return {
+              session: {
+                roomId: data.roomId,
+                callId: socket.data.call.callId,
+                participantId: socket.data.call.participant.id,
+              },
+              snapshot: this.callSnapshot(data.roomId, sockets)!,
+            };
+          });
+        }),
+      );
+      socket.on('call:cancel', (payload, ack) =>
+        handle(ack, async () => {
+          const data = callCancelSchema.parse(payload);
+          return this.withRoom(data.roomId, async () => {
+            await callAccess(data.roomId);
+            const cancelled = (socket.data.cancelledCalls ??= new Set());
+            cancelled.add(data.joinId);
+            if (cancelled.size > 32) cancelled.delete(cancelled.values().next().value!);
+            if (socket.data.call?.joinId === data.joinId) socket.data.call = undefined;
+            this.callSnapshot(data.roomId, await this.authorizedSockets(data.roomId));
+            return null;
+          });
+        }),
+      );
+      socket.on('call:leave', (payload, ack) =>
+        handle(ack, async () => {
+          const data = callSessionSchema.parse(payload);
+          return this.withRoom(data.roomId, async () => {
+            await callAccess(data.roomId, data.callId, data.participantId);
+            socket.data.call = undefined;
+            this.callSnapshot(data.roomId, await this.authorizedSockets(data.roomId));
+            return null;
+          });
+        }),
+      );
+      socket.on('call:state', (payload, ack) =>
+        handle(ack, async () => {
+          const data = callStateSchema.parse(payload);
+          this.rate(`callstate:${socket.data.userId}`, 60);
+          return this.withRoom(data.roomId, async () => {
+            await callAccess(data.roomId, data.callId, data.participantId);
+            socket.data.call!.participant.media = data.media;
+            this.callSnapshot(data.roomId, await this.authorizedSockets(data.roomId));
+            return null;
+          });
+        }),
+      );
+      socket.on('call:signal', (payload, ack) =>
+        handle(ack, async () => {
+          const data = callSignalSchema.parse(payload);
+          this.rate(`callsignal:${socket.data.userId}`, 480);
+          this.rate(
+            `callbytes:${socket.data.userId}`,
+            1_000_000,
+            60_000,
+            JSON.stringify(data).length,
+          );
+          if (data.signal.kind === 'description') this.rate(`callsdp:${socket.data.userId}`, 60);
+          else this.rate(`callcandidate:${socket.data.userId}`, 384);
+          return this.withRoom(data.roomId, async () => {
+            await callAccess(data.roomId, data.callId, data.participantId);
+            const destination = (await this.authorizedSockets(data.roomId)).find(
+              (s) =>
+                s !== socket &&
+                s.data.call?.callId === data.callId &&
+                s.data.call.participant.id === data.to,
+            );
+            if (!destination)
+              throw new RealtimeError('PEER_GONE', 'The participant has left this call.');
+            if (!socket.connected || socket.data.call?.participant.id !== data.participantId)
+              throw new RealtimeError('STALE_CALL', 'This call participation has ended.');
+            const sequences = socket.data.call!.sequences;
+            // Only keep the current (at most three) destinations; churn cannot grow this map.
+            for (const id of sequences.keys())
+              if (![...io.sockets.sockets.values()].some((s) => s.data.call?.participant.id === id))
+                sequences.delete(id);
+            if (data.sequence <= (sequences.get(data.to) ?? 0)) return null;
+            sequences.set(data.to, data.sequence);
+            destination.emit('call:signal', data);
+            return null;
+          });
+        }),
+      );
       socket.on('doc:join', (payload, ack) =>
         handle(ack, async () => {
           const data = documentJoinSchema.parse(payload);
@@ -345,6 +534,7 @@ export class Realtime {
             await this.session(socket.data.sessionHash);
             await this.membership(this.db, roomId, socket.data.userId);
             if (socket.data.roomId === roomId) {
+              socket.data.call = undefined;
               const fileId = socket.data.document?.fileId;
               socket.data.document = undefined;
               socket.data.roomId = undefined;
@@ -414,6 +604,7 @@ export class Realtime {
         }),
       );
       socket.on('disconnect', () => {
+        socket.data.call = undefined;
         const roomId = socket.data.roomId;
         const fileId = socket.data.document?.fileId;
         socket.data.document = undefined;
@@ -441,6 +632,7 @@ export class Realtime {
         if (!(err instanceof RealtimeError)) throw err;
         socket.data.roomId = undefined;
         socket.data.document = undefined;
+        socket.data.call = undefined;
         await socket.leave(roomId);
         socket.emit('room:revoked', { roomId, reason: err.message });
         if (err.code === 'UNAUTHENTICATED') socket.disconnect(true);
@@ -450,6 +642,7 @@ export class Realtime {
   }
   private async presence(roomId: string): Promise<Presence> {
     const sockets = await this.authorizedSockets(roomId);
+    this.callSnapshot(roomId, sockets);
     const online = new Set(sockets.map((s) => s.data.userId));
     const rows = await this.db
       .select({ id: users.id, name: users.name, role: members.role })
@@ -558,6 +751,7 @@ export class Realtime {
     await new Promise<void>((resolve) => (this.io ? this.io.close(() => resolve()) : resolve()));
     await Promise.allSettled([...this.locks.values()]);
     this.tickets.clear();
+    this.calls.clear();
     this.limits.clear();
   }
 }
