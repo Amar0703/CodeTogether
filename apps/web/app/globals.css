@@ -1875,6 +1875,38 @@ form {
   flex-shrink: 0;
   overflow-y: auto;
 }
+
+.cm-ySelectionInfo {
+  opacity: 1 !important;
+  border-radius: 3px;
+}
+.editor-toolbar {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.save-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.save-state {
+  display: flex;
+  overflow-wrap: anywhere;
+}
+.conflict-actions .draft-recovery {
+  padding: 0;
+}
+.draft-recovery {
+  padding: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.draft-recovery p {
+  width: 100%;
+  font-size: 12px;
+  color: var(--muted);
+}
 .member-roster > .panel-hint {
   font-size: 11px;
 }

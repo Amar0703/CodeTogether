@@ -45,17 +45,10 @@ test('two browser contexts receive presence, chat, room events and reconnect cat
     await tab.close();
     await expect(owner.getByTestId('online-count')).toHaveText('2 online now');
 
-    // Room events update the tree, but neither saved content nor new roles discard a draft.
+    // Collaborative edits arrive without refreshing the editor.
     await member.locator('.cm-content').fill('const myDraft = "keep this";');
-    await owner.locator('.cm-content').fill('const shared = "new saved version";');
-    await owner.getByRole('button', { name: 'Save', exact: true }).click();
-    await expect(
-      member.getByText('A newer saved version is available.', { exact: false }),
-    ).toBeVisible();
-    await expect(member.locator('.cm-content')).toContainText('keep this');
-    await member.getByRole('button', { name: 'Save', exact: true }).click();
-    await expect(member.locator('.error-banner')).toContainText('changed since');
-    await expect(member.locator('.cm-content')).toContainText('keep this');
+    await expect(member.getByText('Saved', { exact: true })).toBeVisible();
+    await expect(owner.locator('.cm-content')).toContainText('keep this');
     await owner.getByRole('button', { name: 'New file', exact: true }).click();
     await owner.getByLabel('Name', { exact: true }).fill('notes.md');
     await owner.getByRole('button', { name: 'Create', exact: true }).click();

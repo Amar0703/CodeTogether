@@ -1,5 +1,7 @@
 # Phase 2 realtime rooms
 
+This is the Phase 2 historical record. [Phase 3](phase-3.md) supersedes manual editor save/recovery behavior and document transport limits; ticket authentication, presence and chat continue to apply.
+
 Phase 2 implements authenticated subscriptions, online presence, persistent chat and typed room events on the existing Express service. Save/load and version conflicts remain explicit. CRDT/Yjs, live cursors, voice/video, execution, Redis and multiple realtime instances are outside this phase.
 
 ## Authentication and deployment decision

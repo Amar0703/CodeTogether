@@ -5,7 +5,16 @@ import { rateLimit } from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
 import { and, eq, gt, desc } from 'drizzle-orm';
 import { ZodError } from 'zod';
-import { type Database, users, sessions, rooms, members, files, invites } from '@codetogether/db';
+import {
+  type Database,
+  users,
+  sessions,
+  rooms,
+  members,
+  files,
+  invites,
+  documents,
+} from '@codetogether/db';
 import {
   signupSchema,
   loginSchema,
@@ -430,6 +439,16 @@ export function createApp(
       uid(res),
       writers,
       async (tx) => {
+        const [document] = await tx
+          .select({ id: documents.fileId })
+          .from(documents)
+          .where(eq(documents.fileId, original.id));
+        if (document)
+          fail(
+            409,
+            'COLLABORATIVE_DOCUMENT',
+            'This file uses collaborative editing. Reload the editor; HTTP snapshot saves are disabled.',
+          );
         const [saved] = await tx
           .update(files)
           .set({ content: data.content, version: data.version + 1, updatedAt: new Date() })

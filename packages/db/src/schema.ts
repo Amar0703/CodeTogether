@@ -81,6 +81,13 @@ export const invites = pgTable('invites', {
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
 });
 
+export const documents = pgTable('documents', {
+  fileId: uuid('file_id')
+    .primaryKey()
+    .references(() => files.id, { onDelete: 'cascade' }),
+  state: text().notNull(),
+});
+
 export const messages = pgTable(
   'messages',
   {

@@ -8,6 +8,10 @@ import { html } from '@codemirror/lang-html';
 import { css } from '@codemirror/lang-css';
 import { markdown } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { useMemo } from 'react';
+import { keymap } from '@codemirror/view';
+import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next';
+import type { CollaborativeDocument } from '../lib/document';
 export function language(name: string) {
   const ext = name.split('.').pop()?.toLowerCase();
   if (['js', 'jsx', 'mjs', 'ts', 'tsx'].includes(ext ?? ''))
@@ -25,26 +29,38 @@ export function language(name: string) {
 }
 export default function Editor({
   name,
-  value,
-  onChange,
+  document,
   readOnly,
 }: {
   name: string;
-  value: string;
-  onChange: (value: string) => void;
+  document: CollaborativeDocument;
   readOnly: boolean;
 }) {
+  const extensions = useMemo(
+    () => [
+      language(name),
+      yCollab(document.text, document.awareness, { undoManager: document.undo }),
+      keymap.of(yUndoManagerKeymap),
+    ],
+    [name, document],
+  );
+  const initial = useMemo(() => document.text.toString(), [document]);
   return (
     <CodeMirror
       aria-label="Code editor"
-      value={value}
-      onChange={onChange}
+      value={initial}
       theme={oneDark}
-      extensions={[language(name)]}
+      extensions={extensions}
       editable={!readOnly}
       readOnly={readOnly}
       height="100%"
-      basicSetup={{ foldGutter: true, highlightActiveLine: !readOnly, autocompletion: !readOnly }}
+      basicSetup={{
+        history: false,
+        historyKeymap: false,
+        foldGutter: true,
+        highlightActiveLine: !readOnly,
+        autocompletion: !readOnly,
+      }}
     />
   );
 }

@@ -38,3 +38,7 @@ Invites are reusable until expiry and never change an existing member's role. Re
 `GET /api/rooms/:roomId/messages?limit=50&before=<sequence>` returns chronological chat history and `nextCursor`. Use `after=<sequence>` for forward reconnect catch-up; do not combine both cursors. Membership is required; limits are 1–100 messages per page.
 
 See [Phase 2 contracts](phase-2.md#shared-contracts) for socket events, acknowledgments, delivery semantics, authorization and limits.
+
+## Phase 3 documents
+
+The existing same-origin ticket endpoint authenticates all collaboration. See [document/awareness event contracts](phase-3.md#document-and-awareness-contracts). HTTP PATCH /api/files/:fileId retains VERSION_CONFLICT checks until the first collaborative open, then rejects snapshot saves with 409 COLLABORATIVE_DOCUMENT. GET content is the last committed text projection; unsent local edits are available only in that browser. Document updates commit their snapshot, projection and version together before acknowledgment.

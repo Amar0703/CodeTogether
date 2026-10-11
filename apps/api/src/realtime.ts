@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Server, type Socket } from 'socket.io';
 import { and, asc, desc, eq, gt, lt } from 'drizzle-orm';
 import { ZodError, type z } from 'zod';
-import { type Database, members, messages, rooms, sessions, users } from '@codetogether/db';
+import { type Database, files, members, messages, rooms, sessions, users } from '@codetogether/db';
 import {
   chatHistorySchema,
   chatSendSchema,
@@ -15,9 +15,15 @@ import {
   type Presence,
   type RoomEvent,
   type ServerEvents,
+  documentSchema,
+  documentJoinSchema,
+  documentUpdateSchema,
+  documentAwarenessSchema,
+  type DocumentPeer,
 } from '@codetogether/contracts';
 import { hashToken, token } from './security.js';
 import { normalizeOrigin } from './origin.js';
+import { DocumentStore } from './documents.js';
 
 export class RealtimeError extends Error {
   constructor(
@@ -28,7 +34,13 @@ export class RealtimeError extends Error {
     super(message);
   }
 }
-type Identity = { userId: string; name: string; sessionHash: string; roomId?: string };
+type Identity = {
+  userId: string;
+  name: string;
+  sessionHash: string;
+  roomId?: string;
+  document?: { fileId: string; clientId: number; cursor: DocumentPeer['cursor']; seen: number };
+};
 type RoomSocket = Socket<ClientEvents, ServerEvents, Record<string, never>, Identity>;
 type Store = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
 const wireMessage = (row: typeof messages.$inferSelect): ChatMessage => ({
@@ -47,9 +59,11 @@ export class Realtime {
   private tickets = new Map<string, { sessionHash: string; expiresAt: number }>();
   private limits = new Map<string, { count: number; expiresAt: number }>();
   private locks = new Map<string, Promise<unknown>>();
+  private queued = 0;
   private timer?: ReturnType<typeof setInterval>;
   private sweeping = false;
   readonly origin: string;
+  private documents: DocumentStore;
   constructor(
     private db: Database,
     origin: string,
@@ -62,26 +76,32 @@ export class Realtime {
     } = {},
   ) {
     this.origin = normalizeOrigin(origin);
+    this.documents = new DocumentStore(db);
   }
 
   // Also used by HTTP mutations: revocation, joins, sends and broadcasts cannot overtake each other.
   async withRoom<T>(roomId: string, action: () => Promise<T>): Promise<T> {
+    if (this.queued >= 64)
+      throw new RealtimeError('UNAVAILABLE', 'Room service busy. Retry shortly.', 503);
+    this.queued++;
     const previous = this.locks.get(roomId) ?? Promise.resolve();
     const current = previous.catch(() => {}).then(action);
     this.locks.set(roomId, current);
     try {
       return await current;
     } finally {
+      this.queued--;
       if (this.locks.get(roomId) === current) this.locks.delete(roomId);
     }
   }
-  private rate(key: string, limit: number, windowMs = 60_000) {
+  private rate(key: string, limit: number, windowMs = 60_000, amount = 1) {
     let bucket = this.limits.get(key);
     if (!bucket || bucket.expiresAt <= Date.now()) {
       bucket = { count: 0, expiresAt: Date.now() + windowMs };
       this.limits.set(key, bucket);
     }
-    if (++bucket.count > limit)
+    bucket.count += amount;
+    if (bucket.count > limit)
       throw new RealtimeError('RATE_LIMITED', 'Too many events. Try again shortly.', 429);
   }
   async session(sessionHash: string, store: Store = this.db) {
@@ -129,7 +149,7 @@ export class Realtime {
   attach(server: HttpServer) {
     const io = (this.io = new Server(server, {
       transports: ['websocket'],
-      maxHttpBufferSize: 16_384,
+      maxHttpBufferSize: 2_840_000,
       pingInterval: this.options.pingInterval ?? 25_000,
       pingTimeout: this.options.pingTimeout ?? 20_000,
       // CORS alone does not protect WebSocket upgrades. Reject absent and foreign origins.
@@ -160,9 +180,15 @@ export class Realtime {
         return;
       }
       // Includes unknown packets; limits are shared across this user's tabs.
-      socket.use((_packet, next) => {
+      socket.use((packet, next) => {
         try {
-          this.rate(`packets:${socket.data.userId}`, this.options.actionLimit ?? 120);
+          const documentPacket = ['doc:join', 'doc:update', 'doc:leave', 'doc:awareness'].includes(
+            packet[0],
+          );
+          this.rate(
+            `${documentPacket ? 'docpackets' : 'packets'}:${socket.data.userId}`,
+            this.options.actionLimit ?? (documentPacket ? 3000 : 120),
+          );
           next();
         } catch {
           socket.disconnect(true);
@@ -187,6 +213,115 @@ export class Realtime {
             if (error.code === 'UNAUTHENTICATED') socket.disconnect(true);
           });
       };
+      const documentAccess = async (roomId: string, fileId: string, subscribed = true) => {
+        await this.session(socket.data.sessionHash);
+        const member = await this.membership(this.db, roomId, socket.data.userId);
+        if (
+          !socket.connected ||
+          socket.data.roomId !== roomId ||
+          (subscribed && socket.data.document?.fileId !== fileId)
+        )
+          throw new RealtimeError('NOT_SUBSCRIBED', 'Join this document first.');
+        const [file] = await this.db
+          .select({ id: files.id })
+          .from(files)
+          .where(and(eq(files.id, fileId), eq(files.roomId, roomId), eq(files.kind, 'FILE')));
+        if (!file)
+          throw new RealtimeError(
+            'FILE_NOT_FOUND',
+            'File was deleted. Download your local work.',
+            404,
+          );
+        return member;
+      };
+      socket.on('doc:join', (payload, ack) =>
+        handle(ack, async () => {
+          const data = documentJoinSchema.parse(payload);
+          this.rate(`docjoin:${socket.data.userId}`, 120);
+          return this.withRoom(data.roomId, async () => {
+            await documentAccess(data.roomId, data.fileId, false);
+            if (
+              [...io.sockets.sockets.values()].some(
+                (s) =>
+                  s !== socket &&
+                  s.data.document?.fileId === data.fileId &&
+                  s.data.document.clientId === data.clientId,
+              )
+            )
+              throw new RealtimeError(
+                'CLIENT_ID_CONFLICT',
+                'Another tab has this document identity. Reload this tab.',
+              );
+            const result = await this.documents.sync(
+              data.roomId,
+              data.fileId,
+              { vector: data.vector },
+              async (tx) => {
+                await this.session(socket.data.sessionHash, tx);
+                return (await this.membership(tx, data.roomId, socket.data.userId)).role;
+              },
+            );
+            const previous = socket.data.document?.fileId;
+            socket.data.document = {
+              fileId: data.fileId,
+              clientId: data.clientId,
+              cursor: null,
+              seen: Date.now(),
+            };
+            if (previous && previous !== data.fileId) await this.awareness(data.roomId, previous);
+            await this.awareness(data.roomId, data.fileId);
+            return { ...result, userId: socket.data.userId };
+          });
+        }),
+      );
+      socket.on('doc:update', (payload, ack) =>
+        handle(ack, async () => {
+          const data = documentUpdateSchema.parse(payload);
+          this.rate(`docwrite:${socket.data.userId}`, 600);
+          this.rate(`docbytes:${socket.data.userId}`, 12_000_000, 60_000, data.update.length);
+          return this.withRoom(data.roomId, async () => {
+            await documentAccess(data.roomId, data.fileId);
+            const result = await this.documents.sync(
+              data.roomId,
+              data.fileId,
+              { update: data.update, vector: data.vector },
+              async (tx) => {
+                await this.session(socket.data.sessionHash, tx);
+                return (await this.membership(tx, data.roomId, socket.data.userId)).role;
+              },
+            );
+            // Commit has completed. Never broadcast speculative state.
+            for (const recipient of await this.authorizedSockets(data.roomId))
+              if (recipient.data.document?.fileId === data.fileId && recipient !== socket)
+                recipient.emit('doc:update', { fileId: data.fileId, update: data.update });
+            return { ...result, userId: socket.data.userId };
+          });
+        }),
+      );
+      socket.on('doc:awareness', (payload, ack) =>
+        handle(ack, async () => {
+          const data = documentAwarenessSchema.parse(payload);
+          this.rate(`cursor:${socket.data.userId}`, 1800);
+          return this.withRoom(data.roomId, async () => {
+            await documentAccess(data.roomId, data.fileId);
+            socket.data.document!.cursor = data.cursor;
+            socket.data.document!.seen = Date.now();
+            await this.awareness(data.roomId, data.fileId);
+            return null;
+          });
+        }),
+      );
+      socket.on('doc:leave', (payload, ack) =>
+        handle(ack, async () => {
+          const data = documentSchema.parse(payload);
+          return this.withRoom(data.roomId, async () => {
+            await documentAccess(data.roomId, data.fileId);
+            socket.data.document = undefined;
+            await this.awareness(data.roomId, data.fileId);
+            return null;
+          });
+        }),
+      );
       socket.on('room:join', (payload, ack) =>
         handle(ack, async () => {
           const { roomId } = roomSubscriptionSchema.parse(payload);
@@ -210,8 +345,11 @@ export class Realtime {
             await this.session(socket.data.sessionHash);
             await this.membership(this.db, roomId, socket.data.userId);
             if (socket.data.roomId === roomId) {
+              const fileId = socket.data.document?.fileId;
+              socket.data.document = undefined;
               socket.data.roomId = undefined;
               await socket.leave(roomId);
+              if (fileId) await this.awareness(roomId, fileId);
               await this.presence(roomId);
             }
             return null;
@@ -277,7 +415,11 @@ export class Realtime {
       );
       socket.on('disconnect', () => {
         const roomId = socket.data.roomId;
+        const fileId = socket.data.document?.fileId;
+        socket.data.document = undefined;
         socket.data.roomId = undefined;
+        if (roomId && fileId)
+          void this.withRoom(roomId, () => this.awareness(roomId, fileId)).catch(() => {});
         if (roomId) void this.withRoom(roomId, () => this.presence(roomId)).catch(() => {});
       });
     });
@@ -298,6 +440,7 @@ export class Realtime {
       } catch (err) {
         if (!(err instanceof RealtimeError)) throw err;
         socket.data.roomId = undefined;
+        socket.data.document = undefined;
         await socket.leave(roomId);
         socket.emit('room:revoked', { roomId, reason: err.message });
         if (err.code === 'UNAUTHENTICATED') socket.disconnect(true);
@@ -317,10 +460,42 @@ export class Realtime {
     for (const socket of sockets) socket.emit('presence:update', presence);
     return presence;
   }
+  private async awareness(roomId: string, fileId: string) {
+    const sockets = (await this.authorizedSockets(roomId)).filter(
+      (s) => s.data.document?.fileId === fileId,
+    );
+    const userIds = [...new Set(sockets.map((s) => s.data.userId))].sort();
+    const peers: DocumentPeer[] = sockets
+      .filter((s) => Date.now() - s.data.document!.seen < 45_000)
+      .map((s) => {
+        const palette = ['#60a5fa', '#f472b6', '#4ade80', '#fbbf24', '#c084fc', '#fb923c'];
+        const color = palette[userIds.indexOf(s.data.userId) % palette.length];
+        return {
+          clientId: s.data.document!.clientId,
+          cursor: s.data.document!.cursor,
+          user: { name: s.data.name, color, colorLight: color + '44' },
+        };
+      });
+    for (const s of sockets) s.emit('doc:awareness', { fileId, peers });
+  }
   /** Called after commit, while the caller holds withRoom. */
   async publish(event: RoomEvent) {
     const sockets = await this.authorizedSockets(event.roomId);
+    for (const socket of sockets) {
+      const fileId = socket.data.document?.fileId;
+      if (!fileId) continue;
+      const [file] = await this.db.select({ id: files.id }).from(files).where(eq(files.id, fileId));
+      if (!file) {
+        socket.data.document = undefined;
+        socket.emit('doc:revoked', {
+          fileId,
+          reason: 'File was deleted. Download your local work.',
+        });
+      }
+    }
     for (const socket of sockets) socket.emit('room:event', event);
+    for (const fileId of new Set(sockets.map((s) => s.data.document?.fileId)))
+      if (fileId) await this.awareness(event.roomId, fileId);
     if (event.type === 'membership.changed' || event.type === 'room.deleted')
       await this.presence(event.roomId);
   }
@@ -340,7 +515,16 @@ export class Realtime {
         [...(this.io?.sockets.sockets.values() ?? [])].map((s) => s.data.roomId),
       );
       for (const roomId of roomIds)
-        if (roomId) await this.withRoom(roomId, () => this.presence(roomId));
+        if (roomId)
+          await this.withRoom(roomId, async () => {
+            await this.presence(roomId);
+            for (const fileId of new Set(
+              [...this.io!.sockets.sockets.values()]
+                .filter((s) => s.data.roomId === roomId)
+                .map((s) => s.data.document?.fileId),
+            ))
+              if (fileId) await this.awareness(roomId, fileId);
+          });
     } catch {
       /* Database outage: do not emit data; subsequent actions reauthorize and fail closed. */
     } finally {

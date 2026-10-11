@@ -272,5 +272,16 @@ export function useRoomRealtime(
       setLoading(false);
     }
   };
-  return { status, online, messages, pending, error, before, loading, loadOlder, send };
+  return {
+    socket: socketRef.current,
+    status,
+    online,
+    messages,
+    pending,
+    error,
+    before,
+    loading,
+    loadOlder,
+    send,
+  };
 }

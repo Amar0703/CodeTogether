@@ -22,7 +22,7 @@ test('two accounts share persistent files and a viewer cannot edit', async ({ br
   await owner.getByRole('button', { name: 'Create room', exact: true }).click();
   await expect(owner.locator('.cm-content')).toBeVisible();
   await owner.locator('.cm-content').fill('const persisted = "Hello from Alex";');
-  await owner.getByRole('button', { name: 'Save', exact: true }).click();
+  await owner.getByRole('button', { name: 'Sync now', exact: true }).click();
   await expect(owner.getByText('Saved', { exact: true })).toBeVisible();
   await owner.getByRole('button', { name: 'Invite', exact: true }).click();
   await owner.getByLabel('Access level').selectOption('VIEWER');
@@ -33,7 +33,7 @@ test('two accounts share persistent files and a viewer cannot edit', async ({ br
   await member.getByRole('button', { name: 'Accept invitation' }).click();
   await expect(member.locator('.cm-content')).toContainText('Hello from Alex');
   await expect(member.locator('.cm-content')).toHaveAttribute('contenteditable', 'false');
-  await expect(member.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  await expect(member.getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
   await owner.reload();
   await expect(owner.locator('.cm-content')).toContainText('Hello from Alex');
   await owner.getByRole('button', { name: 'New folder', exact: true }).click();
@@ -43,7 +43,7 @@ test('two accounts share persistent files and a viewer cannot edit', async ({ br
   await owner.getByLabel('Name', { exact: true }).fill('helper.py');
   await owner.getByRole('button', { name: 'Create', exact: true }).click();
   await owner.locator('.cm-content').fill('print("saved too")');
-  await owner.getByRole('button', { name: 'Save', exact: true }).click();
+  await owner.getByRole('button', { name: 'Sync now', exact: true }).click();
   await expect(owner.getByText('Saved', { exact: true })).toBeVisible();
   await member.getByRole('button', { name: 'Refresh files', exact: true }).click();
   await member.getByRole('button', { name: 'helper.py', exact: true }).click();

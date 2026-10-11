@@ -4,7 +4,6 @@ import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
-  Check,
   ChevronRight,
   ChevronDown,
   Code2,
@@ -17,7 +16,6 @@ import {
   LogOut,
   Pencil,
   RefreshCw,
-  Save,
   Settings2,
   Trash2,
   UserPlus,
@@ -29,6 +27,8 @@ import { api, ApiError, message } from '../lib/api';
 import { Avatar, ErrorBanner, Loading, Modal } from './ui';
 import { useRoomRealtime } from '../lib/realtime';
 import { Chat } from './chat';
+import { DraftRecovery } from './recovery';
+import { CollaborativeDocument, type DocumentStatus } from '../lib/document';
 const Editor = dynamic(() => import('./editor'), { ssr: false, loading: () => <Loading /> });
 type Dialog = 'file' | 'folder' | 'rename' | 'invite' | 'settings' | null;
 export function Workspace({ id }: { id: string }) {
@@ -40,14 +40,21 @@ export function Workspace({ id }: { id: string }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [accountId, setAccountId] = useState('');
+  const [document, setDocument] = useState<CollaborativeDocument>();
+  const [documentStatus, setDocumentStatus] = useState<DocumentStatus>({
+    label: 'Connecting…',
+    pending: true,
+    ready: false,
+    blocked: false,
+  });
   const [dialog, setDialog] = useState<Dialog>(null);
   const [dialogError, setDialogError] = useState('');
   const [invite, setInvite] = useState('');
   const [copied, setCopied] = useState(false);
   const [people, setPeople] = useState(true);
   const [accessRemoved, setAccessRemoved] = useState(false);
-  const dirty = !!active && draft !== active.content;
+  const dirty = !!active && documentStatus.pending;
   const canEdit = !!detail && !accessRemoved && detail.room.role !== 'VIEWER';
   const isOwner = !accessRemoved && detail?.room.role === 'OWNER';
   const refreshSequence = useRef(0);
@@ -62,19 +69,54 @@ export function Workspace({ id }: { id: string }) {
     setError(`${reason} Your open draft is still available to download.`);
   });
   const latestActive = detail?.files.find((file) => file.id === active?.id);
-  const remoteChange = active && (!latestActive || latestActive.version !== active.version);
+  const remoteChange = !!detail && !!active && !latestActive;
   useEffect(() => {
+    void api<{ user: { id: string } }>('/auth/me')
+      .then((result) => setAccountId(result.user.id))
+      .catch((err) => setError(message(err)));
+  }, []);
+  useEffect(() => {
+    if (!active?.id || !accountId) return;
+    setDocumentStatus({ label: 'Connecting…', pending: true, ready: false, blocked: false });
+    const provider = new CollaborativeDocument(id, active.id, accountId, (status, content) => {
+      setDocumentStatus(status);
+      setDraft(content);
+    });
+    setDocument(provider);
+    return () => provider.destroy();
+  }, [id, active?.id, accountId]);
+  useEffect(() => {
+    if (!document || document.fileId !== active?.id) return;
+    if (accessRemoved || remoteChange)
+      document.stop('Access removed or file deleted · download your draft');
+    else document.connect(realtime.socket, realtime.status === 'Connected');
+  }, [
+    document,
+    active?.id,
+    realtime.socket,
+    realtime.status,
+    detail?.room.role,
+    accessRemoved,
+    remoteChange,
+  ]);
+  useEffect(() => {
+    let cancelled = false;
     refresh()
       .then((result) => {
+        if (cancelled) return;
         const file = result.files.find((f) => f.kind === 'FILE');
         setActive(file);
         setDraft(file?.content ?? '');
       })
       .catch((err) => {
+        if (cancelled) return;
         if (err instanceof ApiError && err.status === 401)
           router.replace(`/login?next=${encodeURIComponent(`/rooms/${id}`)}`);
         else setError(message(err));
       });
+    return () => {
+      cancelled = true;
+    };
   }, [id, refresh, router]);
   useEffect(() => {
     const warn = (e: BeforeUnloadEvent) => {
@@ -84,26 +126,8 @@ export function Workspace({ id }: { id: string }) {
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
   const save = useCallback(async () => {
-    if (!active || !dirty || !canEdit || saving) return;
-    setSaving(true);
-    setError('');
-    try {
-      const result = await api<{ file: RoomFile }>(`/files/${active.id}`, 'PATCH', {
-        content: draft,
-        version: active.version,
-      });
-      setActive(result.file);
-      setDetail((prev) =>
-        prev
-          ? { ...prev, files: prev.files.map((f) => (f.id === result.file.id ? result.file : f)) }
-          : prev,
-      );
-    } catch (err) {
-      setError(message(err));
-    } finally {
-      setSaving(false);
-    }
-  }, [active, dirty, canEdit, saving, draft]);
+    await document?.flush();
+  }, [document]);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -114,9 +138,13 @@ export function Workspace({ id }: { id: string }) {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [save]);
-  const discard = () => !dirty || window.confirm('You have unsaved changes. Discard your draft?');
+  const discard = () =>
+    !dirty ||
+    window.confirm(
+      'Changes are not yet confirmed by the server. Browser backup is best effort; download important work before leaving. Continue?',
+    );
   async function openFile(file: RoomFile) {
-    if (saving || busy) return;
+    if (busy) return;
     if (file.kind === 'FOLDER') {
       setFolderId(file.id);
       setCollapsed((previous) => {
@@ -142,7 +170,7 @@ export function Workspace({ id }: { id: string }) {
     }
   }
   async function reload() {
-    if (saving || !discard()) return;
+    if (!discard()) return;
     setBusy(true);
     try {
       const result = await refresh();
@@ -273,7 +301,7 @@ export function Workspace({ id }: { id: string }) {
             style={{ paddingLeft: 14 + depth * 16 }}
             onClick={() => void openFile(file)}
             title={file.path}
-            disabled={busy || saving}
+            disabled={busy}
           >
             {file.kind === 'FOLDER' ? (
               <>
@@ -293,6 +321,7 @@ export function Workspace({ id }: { id: string }) {
     return error ? (
       <main className="standalone">
         <ErrorBanner error={error} />
+        <DraftRecovery accountId={accountId} roomId={id} />
         <button className="button" onClick={() => router.push('/')}>
           Back to rooms
         </button>
@@ -307,7 +336,7 @@ export function Workspace({ id }: { id: string }) {
         <button
           className="studio-back"
           aria-label="Back to rooms"
-          disabled={saving}
+          disabled={busy}
           onClick={() => {
             if (discard()) router.push('/');
           }}
@@ -366,7 +395,7 @@ export function Workspace({ id }: { id: string }) {
               className="icon-button"
               aria-label="Refresh files"
               title="Refresh files"
-              disabled={busy || saving}
+              disabled={busy}
               onClick={() => void reload()}
             >
               <RefreshCw size={14} />
@@ -390,7 +419,7 @@ export function Workspace({ id }: { id: string }) {
                   className="icon-button"
                   aria-label="New file"
                   title="New file"
-                  disabled={busy || saving}
+                  disabled={busy}
                   onClick={() => {
                     if (discard()) showDialog('file');
                   }}
@@ -401,7 +430,7 @@ export function Workspace({ id }: { id: string }) {
                   className="icon-button"
                   aria-label="New folder"
                   title="New folder"
-                  disabled={busy || saving}
+                  disabled={busy}
                   onClick={() => showDialog('folder')}
                 >
                   <FolderPlus size={17} />
@@ -410,7 +439,7 @@ export function Workspace({ id }: { id: string }) {
                   className="icon-button"
                   aria-label="Rename selected"
                   title="Rename selected"
-                  disabled={!target || busy || saving}
+                  disabled={!target || busy}
                   onClick={() => showDialog('rename')}
                 >
                   <Pencil size={15} />
@@ -419,7 +448,7 @@ export function Workspace({ id }: { id: string }) {
                   className="icon-button danger-text"
                   aria-label="Delete selected"
                   title="Delete selected"
-                  disabled={!target || busy || saving}
+                  disabled={!target || busy}
                   onClick={() => void removeFile()}
                 >
                   <Trash2 size={15} />
@@ -435,58 +464,54 @@ export function Workspace({ id }: { id: string }) {
           <div className="workspace-note">
             <span className="status-dot" />
             <strong>A little focus goes a long way.</strong>
-            <p>Save your work. Come back with a fresh perspective.</p>
+            <p>Edits sync automatically. Keep an eye on the save status.</p>
           </div>
         </aside>
         <section className="editor-panel">
           <div className="editor-toolbar">
             <div className="file-tab">
               <FileCode2 size={15} />
-              {active?.name ?? 'Welcome'}
+              {latestActive?.name ?? active?.name ?? 'Welcome'}
               {dirty && <span className="unsaved-dot" aria-label="Unsaved changes" />}
             </div>
             <div className="save-actions">
-              <span className="save-state">
-                {saving ? (
-                  'Saving…'
-                ) : dirty ? (
-                  'Unsaved changes'
-                ) : (
-                  <>
-                    <Check size={13} /> Saved
-                  </>
-                )}
-              </span>
+              <span className="save-state">{documentStatus.label}</span>
               <button
                 className="button primary small"
-                disabled={!dirty || saving || busy || !canEdit}
+                disabled={!active || !canEdit || documentStatus.blocked}
                 onClick={() => void save()}
               >
-                <Save size={14} /> Save
+                Sync now
               </button>
             </div>
           </div>
           <div className="file-breadcrumb">
-            {active?.path.slice(1).split('/').join('  /  ') ?? 'Open a file to start'}
-            <span>{canEdit ? 'Ctrl / ⌘ + S to save' : 'Viewer · read-only'}</span>
+            {(latestActive?.path ?? active?.path)?.slice(1).split('/').join('  /  ') ??
+              'Open a file to start'}
+            <span>{canEdit ? 'Autosave · Ctrl / ⌘ + S to sync' : 'Viewer · read-only'}</span>
           </div>
           <ErrorBanner error={error} />
+          {(accessRemoved || documentStatus.blocked) && (
+            <DraftRecovery accountId={accountId} roomId={id} />
+          )}
           {remoteChange && !accessRemoved && (
             <div className="remote-notice" role="status">
               {latestActive
                 ? 'A newer saved version is available.'
                 : 'This file was deleted from the room.'}{' '}
-              Your open draft is unchanged. Use Refresh files when ready.
+              Local work is retained for download. Synchronization has stopped.
             </div>
           )}
-          {(dirty || error.includes('changed since') || accessRemoved) && (
+          {active && (
             <div className="conflict-actions">
               <button
                 className="button small"
                 onClick={() => {
-                  const blob = new Blob([draft], { type: 'text/plain' });
+                  const blob = new Blob([document?.text.toString() ?? draft], {
+                    type: 'text/plain',
+                  });
                   const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
+                  const a = window.document.createElement('a');
                   a.href = url;
                   a.download = `draft-${active?.name ?? 'file.txt'}`;
                   a.click();
@@ -496,19 +521,23 @@ export function Workspace({ id }: { id: string }) {
                 Download your draft
               </button>
               <button className="button small" onClick={() => void reload()}>
-                Reload saved version
+                Refresh files list
               </button>
+              {!accessRemoved && !documentStatus.blocked && (
+                <DraftRecovery accountId={accountId} roomId={id} />
+              )}
             </div>
           )}
           <div className="editor-surface">
-            {active ? (
+            {active && document?.fileId === active.id && documentStatus.ready ? (
               <Editor
                 key={active.id}
-                name={active.name}
-                value={draft}
-                onChange={setDraft}
-                readOnly={!canEdit || busy}
+                name={latestActive?.name ?? active.name}
+                document={document}
+                readOnly={!canEdit || busy || documentStatus.blocked}
               />
+            ) : active ? (
+              <Loading />
             ) : (
               <div className="editor-empty">
                 <Code2 size={40} />
@@ -529,7 +558,7 @@ export function Workspace({ id }: { id: string }) {
             </span>
             <span>
               {active
-                ? `Version ${active.version}  ·  ${draft.split('\n').length} lines  ·  UTF-8`
+                ? `Collaborative text  ·  ${draft.split('\n').length} lines  ·  UTF-8`
                 : 'No file selected'}
             </span>
           </div>
@@ -615,7 +644,7 @@ export function Workspace({ id }: { id: string }) {
             {!isOwner && (
               <button
                 className="button small leave-button"
-                disabled={busy || saving}
+                disabled={busy}
                 onClick={async () => {
                   if (
                     !discard() ||
