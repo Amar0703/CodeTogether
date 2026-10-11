@@ -50,6 +50,8 @@ If access is removed, downgraded with pending edits, the account changes, or the
 
 Undo/redo is scoped to the binding's local transaction origin. Remote updates, server synchronization and browser restoration are excluded from the undo manager. Undo history is reset on file switch/reload and is not a durable cross-session timeline.
 
+Undo/redo shortcuts check the editor's current read-only state before invoking Yjs, including after a live role change. A viewer can keep receiving remote edits without creating rejected local undo updates; promotion back to editor enables editing and the existing local history without reloading. This does not resume synchronization for genuinely revoked access or bypass recovery safeguards for unacknowledged drafts.
+
 ## Bounds and operational limits
 
 WebSocket JSON packets are capped at 2,840,000 bytes to accommodate base64 updates. Decoded updates/snapshots are capped at 2 MiB, state vectors at 32,768 base64 characters, plain text at 200,000 code units, and decoded update struct counts at 100,000. Only the content text root is accepted; maps, embedded values, formatting, extra roots, malformed binary and missing dependencies are rejected without committing. Awareness is a strict relative-position schema.
@@ -95,11 +97,12 @@ PGLITE_DATA_DIR is ignored when DATABASE_URL is set. API_URL and NEXT_PUBLIC_REA
 
 ## Acceptance record
 
-Local verification completed on 11 October 2026: all 30 API/socket/database tests and all four Chromium browser tests passed; lint, TypeScript and production build passed. Desktop 1440 × 1000 and mobile 390 × 844 screenshots were inspected. PostgreSQL-server/Neon acceptance and hosted CI were not run in this task; local database tests used PGlite. Existing Phase 1/2 browser assertions about manual-save conflicts are replaced by collaborative convergence; legacy version-conflict behavior is still covered by API tests.
+Local verification completed on 11 October 2026: all 30 API/socket/database tests and all five Chromium browser tests passed; lint, TypeScript and production build passed. Desktop 1440 × 1000 and mobile 390 × 844 screenshots were inspected. PostgreSQL-server/Neon acceptance and hosted CI were not run in this task; local database tests used PGlite. Existing Phase 1/2 browser assertions about manual-save conflicts are replaced by collaborative convergence; legacy version-conflict behavior is still covered by API tests.
 
 - [x] Final lint, TypeScript, API/database/socket suite and production build.
 - [x] Two-context simultaneous editing, convergence and selections without refresh.
 - [x] Local undo/redo preserves peer contributions; switching files isolates content and undo.
+- [x] Editor → viewer → editor transitions: keyboard and native history attempts cannot alter viewer content, remote edits keep arriving, and promotion restores editing/undo/redo without refresh.
 - [x] Offline edits merge once after reload; revoked offline work stays recoverable and is never replayed.
 - [x] Concurrent legacy-file initialization, malformed updates, viewer restrictions, cross-room/file isolation and connected permission changes.
 - [x] Forced database failure rolls back snapshot and projection, emits no success, and retries safely; stale awareness expires.

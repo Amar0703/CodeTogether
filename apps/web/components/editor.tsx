@@ -9,9 +9,28 @@ import { css } from '@codemirror/lang-css';
 import { markdown } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { useMemo } from 'react';
-import { keymap } from '@codemirror/view';
+import { Prec } from '@codemirror/state';
+import { EditorView, keymap } from '@codemirror/view';
 import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next';
 import type { CollaborativeDocument } from '../lib/document';
+
+// The binding's undo commands mutate Y.Text directly and do not check readOnly.
+// Consume these shortcuts before they can create a rejected local update and stop sync.
+const collaborativeHistory = Prec.highest([
+  keymap.of(
+    yUndoManagerKeymap.map((binding) => ({
+      ...binding,
+      run: (view) => view.state.readOnly || binding.run?.(view) || false,
+    })),
+  ),
+  // Native browser/menu history also reaches the binding through beforeinput.
+  EditorView.domEventHandlers({
+    beforeinput: (event, view) =>
+      view.state.readOnly &&
+      (event.inputType === 'historyUndo' || event.inputType === 'historyRedo'),
+  }),
+]);
+
 export function language(name: string) {
   const ext = name.split('.').pop()?.toLowerCase();
   if (['js', 'jsx', 'mjs', 'ts', 'tsx'].includes(ext ?? ''))
@@ -40,7 +59,7 @@ export default function Editor({
     () => [
       language(name),
       yCollab(document.text, document.awareness, { undoManager: document.undo }),
-      keymap.of(yUndoManagerKeymap),
+      collaborativeHistory,
     ],
     [name, document],
   );

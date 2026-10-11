@@ -127,6 +127,85 @@ test('simultaneous edits converge, selections appear, local undo preserves peer 
   }
 });
 
+test('viewer undo and redo cannot change the document or break sync after role changes', async ({
+  browser,
+}) => {
+  const { owner, member, ownerContext, memberContext, roomId, users, headers } =
+    await pair(browser);
+  const setRole = async (role: 'EDITOR' | 'VIEWER') => {
+    const response = await ownerContext.request.patch(
+      `http://localhost:3000/api/rooms/${roomId}/members/${users[1].id}`,
+      { headers, data: { role } },
+    );
+    expect(response.ok()).toBe(true);
+    await expect(member.locator('.cm-content')).toHaveAttribute(
+      'contenteditable',
+      role === 'EDITOR' ? 'true' : 'false',
+    );
+    await converged(owner, member);
+  };
+  const nativeHistory = async (inputType: 'historyUndo' | 'historyRedo') => {
+    // Browser menus and mobile history controls can bypass the keyboard keymap.
+    const prevented = await member.locator('.cm-content').evaluate(
+      (element, type) =>
+        !element.dispatchEvent(
+          new InputEvent('beforeinput', {
+            inputType: type,
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      inputType,
+    );
+    expect(prevented).toBe(true);
+  };
+  try {
+    await owner.locator('.cm-content').fill('base\n');
+    await converged(owner, member);
+    await append(member, 'BOB_ORIGINAL');
+    await converged(owner, member);
+    await setRole('VIEWER');
+    await member.locator('.cm-content').click();
+    await member.keyboard.press('Control+z');
+    await nativeHistory('historyUndo');
+    await expect(member.locator('.cm-content')).toContainText('BOB_ORIGINAL');
+    await append(owner, 'ALICE_WHILE_VIEWING');
+    await converged(owner, member);
+    await expect(member.locator('.cm-content')).toContainText('ALICE_WHILE_VIEWING');
+
+    // Promotion must re-enable the existing editor without a refresh or file switch.
+    await setRole('EDITOR');
+    await append(member, 'BOB_AFTER_PROMOTION');
+    await converged(owner, member);
+    await expect(owner.locator('.cm-content')).toContainText('BOB_AFTER_PROMOTION');
+    await member.keyboard.press('Control+z');
+    await converged(owner, member);
+    await expect(member.locator('.cm-content')).not.toContainText('BOB_AFTER_PROMOTION');
+    await expect(member.locator('.cm-content')).toContainText('ALICE_WHILE_VIEWING');
+
+    // Keep a real redo entry across demotion and exercise both Windows redo shortcuts.
+    await setRole('VIEWER');
+    await member.locator('.cm-content').click();
+    await member.keyboard.press('Control+y');
+    await expect(member.locator('.cm-content')).not.toContainText('BOB_AFTER_PROMOTION');
+    await member.keyboard.press('Control+Shift+z');
+    await nativeHistory('historyRedo');
+    await expect(member.locator('.cm-content')).not.toContainText('BOB_AFTER_PROMOTION');
+    await append(owner, 'ALICE_AFTER_REDO_ATTEMPT');
+    await converged(owner, member);
+    await expect(member.locator('.cm-content')).toContainText('ALICE_AFTER_REDO_ATTEMPT');
+    await setRole('EDITOR');
+    await member.locator('.cm-content').click();
+    await member.keyboard.press('Control+y');
+    await converged(owner, member);
+    await expect(owner.locator('.cm-content')).toContainText('BOB_AFTER_PROMOTION');
+    await expect(member.locator('.cm-content')).toContainText('ALICE_AFTER_REDO_ATTEMPT');
+  } finally {
+    await ownerContext.close();
+    await memberContext.close();
+  }
+});
+
 test('offline edits merge once after reload; offline revocation retains exportable work without replay', async ({
   browser,
 }) => {
