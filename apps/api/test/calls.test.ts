@@ -286,3 +286,95 @@ test('ICE issuance validates configuration, uses expiring HMAC credentials, enfo
   }
   await f.viewer.post(path).set(headers).expect(429);
 });
+
+test('join retries are idempotent, cancellation rejects delayed joins, and candidate-before-SDP delivery is bounded', async () => {
+  const f = await fixture(),
+    a = await f.connect(),
+    b = await f.connect(f.viewer);
+  const payload = { roomId: f.roomId, joinId: randomUUID(), media };
+  const ca = ok<CallJoined>(await a.emitWithAck('call:join', payload));
+  assert.deepEqual(ok<CallJoined>(await a.emitWithAck('call:join', payload)).session, ca.session);
+  const cb = await f.join(b),
+    received: CallSignal[] = [];
+  b.on('call:signal', (s) => received.push(s));
+  const early: CallSignal = {
+    ...signal(ca, cb),
+    signal: {
+      kind: 'candidate',
+      candidate: 'candidate:1 1 udp 1 192.0.2.1 12345 typ host',
+      sdpMid: '0',
+      sdpMLineIndex: 0,
+      usernameFragment: 'early',
+    },
+  };
+  ok(await a.emitWithAck('call:signal', early));
+  ok(await a.emitWithAck('call:signal', signal(ca, cb, 2)));
+  ok(await a.emitWithAck('call:signal', early));
+  await delay(30);
+  assert.deepEqual(
+    received.map((s) => s.signal.kind),
+    ['candidate', 'description'],
+  );
+  ok(await a.emitWithAck('call:cancel', { roomId: f.roomId, joinId: payload.joinId }));
+  code(await a.emitWithAck('call:join', payload), 'STALE_CALL');
+  code(await a.emitWithAck('call:state', { ...ca.session, media }), 'STALE_CALL');
+  const next = await f.join(a);
+  assert.notEqual(next.session.participantId, ca.session.participantId);
+  ok(await a.emitWithAck('call:cancel', { roomId: f.roomId, joinId: payload.joinId }));
+  ok(await a.emitWithAck('call:state', { ...next.session, media }));
+  // Packet budget is separate from chat; malformed floods also count.
+  await Promise.all(
+    Array.from({ length: 605 }, () =>
+      a.timeout(8000).emitWithAck('call:leave', { ...next.session, callId: 'invalid' }),
+    ),
+  );
+  code(await a.emitWithAck('call:state', { ...next.session, media }), 'RATE_LIMITED');
+  ok(
+    await a.emitWithAck('chat:send', {
+      roomId: f.roomId,
+      clientMessageId: randomUUID(),
+      body: 'Still connected after a media flood',
+    }),
+  );
+  a.disconnect();
+  b.disconnect();
+});
+
+test('API restart rebuilds transient call IDs and abandoned media leases expire', async () => {
+  const f = await fixture(),
+    a = await f.connect();
+  const previous = await f.join(a);
+  const email = (await f.owner.get('/api/auth/me')).body.user.email;
+  await realtime.close();
+  realtime = new Realtime(db.db, origin, { sweepMs: 30, callLeaseMs: 200 });
+  app = createApp(db.db, { origin, realtime, rateLimit: 1000 });
+  const server = createServer(app);
+  realtime.attach(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  url = `http://127.0.0.1:${address.port}`;
+  const agent = request.agent(app);
+  await agent
+    .post('/api/auth/login')
+    .set(headers)
+    .send({ email, password: 'call test password' })
+    .expect(200);
+  const socket = await f.connect(agent),
+    joined = await f.join(socket);
+  assert.notEqual(joined.session.callId, previous.session.callId);
+  code(await socket.emitWithAck('call:state', { ...previous.session, media }), 'STALE_CALL');
+  const expired = new Promise<void>((resolve) =>
+    socket.on('call:snapshot', (s) => {
+      if (!s.participants.length) resolve();
+    }),
+  );
+  await Promise.race([
+    expired,
+    delay(3000).then(() => {
+      throw new Error('Media lease did not expire');
+    }),
+  ]);
+  code(await socket.emitWithAck('call:state', { ...joined.session, media }), 'STALE_CALL');
+  socket.disconnect();
+});

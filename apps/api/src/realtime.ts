@@ -52,6 +52,7 @@ type Identity = {
   call?: {
     callId: string;
     joinId: string;
+    seen: number;
     participant: CallParticipant;
     sequences: Map<string, number>;
   };
@@ -91,6 +92,7 @@ export class Realtime {
       pingTimeout?: number;
       actionLimit?: number;
       iceSettings?: IceSettings;
+      callLeaseMs?: number;
     } = {},
   ) {
     this.origin = normalizeOrigin(origin);
@@ -328,6 +330,7 @@ export class Realtime {
                 this.calls.set(data.roomId, call);
               }
               socket.data.call = {
+                seen: Date.now(),
                 callId: call.id,
                 joinId: data.joinId,
                 sequences: new Map(),
@@ -382,6 +385,7 @@ export class Realtime {
           return this.withRoom(data.roomId, async () => {
             await callAccess(data.roomId, data.callId, data.participantId);
             socket.data.call!.participant.media = data.media;
+            socket.data.call!.seen = Date.now();
             this.callSnapshot(data.roomId, await this.authorizedSockets(data.roomId));
             return null;
           });
@@ -642,6 +646,12 @@ export class Realtime {
   }
   private async presence(roomId: string): Promise<Presence> {
     const sockets = await this.authorizedSockets(roomId);
+    for (const socket of sockets)
+      if (
+        socket.data.call &&
+        Date.now() - socket.data.call.seen > (this.options.callLeaseMs ?? 45_000)
+      )
+        socket.data.call = undefined;
     this.callSnapshot(roomId, sockets);
     const online = new Set(sockets.map((s) => s.data.userId));
     const rows = await this.db
@@ -704,9 +714,10 @@ export class Realtime {
           if (err instanceof RealtimeError) socket.disconnect(true);
         }
       }
-      const roomIds = new Set(
-        [...(this.io?.sockets.sockets.values() ?? [])].map((s) => s.data.roomId),
-      );
+      const roomIds = new Set([
+        ...this.calls.keys(),
+        ...[...(this.io?.sockets.sockets.values() ?? [])].map((s) => s.data.roomId),
+      ]);
       for (const roomId of roomIds)
         if (roomId)
           await this.withRoom(roomId, async () => {
