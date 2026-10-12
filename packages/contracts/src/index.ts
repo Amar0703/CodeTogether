@@ -123,6 +123,11 @@ export type RealtimeResult<T> =
   { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
 export type Ack<T> = (result: RealtimeResult<T>) => void;
 export interface ClientEvents {
+  'call:cancel': (payload: z.infer<typeof callCancelSchema>, ack: Ack<null>) => void;
+  'call:join': (payload: z.infer<typeof callJoinSchema>, ack: Ack<CallJoined>) => void;
+  'call:leave': (payload: CallSession, ack: Ack<null>) => void;
+  'call:state': (payload: z.infer<typeof callStateSchema>, ack: Ack<null>) => void;
+  'call:signal': (payload: CallSignal, ack: Ack<null>) => void;
   'doc:join': (payload: z.infer<typeof documentJoinSchema>, ack: Ack<DocumentSync>) => void;
   'doc:update': (payload: z.infer<typeof documentUpdateSchema>, ack: Ack<DocumentSync>) => void;
   'doc:leave': (payload: z.infer<typeof documentSchema>, ack: Ack<null>) => void;
@@ -132,6 +137,8 @@ export interface ClientEvents {
   'chat:send': (payload: z.infer<typeof chatSendSchema>, ack: Ack<ChatMessage>) => void;
 }
 export interface ServerEvents {
+  'call:snapshot': (payload: CallSnapshot) => void;
+  'call:signal': (payload: CallSignal) => void;
   'doc:update': (payload: { fileId: string; update: string }) => void;
   'doc:awareness': (payload: { fileId: string; peers: DocumentPeer[] }) => void;
   'doc:revoked': (payload: { fileId: string; reason: string }) => void;
@@ -189,3 +196,55 @@ export interface DocumentSync {
   version: number;
   role: Role;
 }
+
+export const MAX_CALL_PARTICIPANTS = 4;
+export const callCancelSchema = roomSubscriptionSchema.extend({ joinId: idSchema }).strict();
+export const mediaStateSchema = z.object({ microphone: z.boolean(), camera: z.boolean() }).strict();
+export const callJoinSchema = roomSubscriptionSchema
+  .extend({ joinId: idSchema, media: mediaStateSchema })
+  .strict();
+export const callSessionSchema = roomSubscriptionSchema
+  .extend({ callId: idSchema, participantId: idSchema })
+  .strict();
+export const callStateSchema = callSessionSchema.extend({ media: mediaStateSchema }).strict();
+export const callSignalSchema = callSessionSchema
+  .extend({
+    to: idSchema,
+    sequence: z.number().int().min(1).max(1_000_000),
+    signal: z.discriminatedUnion('kind', [
+      z
+        .object({
+          kind: z.literal('description'),
+          type: z.enum(['offer', 'answer']),
+          sdp: z.string().min(1).max(65_536),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal('candidate'),
+          candidate: z.string().min(1).max(2048),
+          sdpMid: z.string().max(64).nullable(),
+          sdpMLineIndex: z.number().int().min(0).max(8).nullable(),
+          usernameFragment: z.string().min(1).max(256),
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
+export type MediaState = z.infer<typeof mediaStateSchema>;
+export type CallSession = z.infer<typeof callSessionSchema>;
+export type CallSignal = z.infer<typeof callSignalSchema>;
+export type CallParticipant = { id: string; userId: string; name: string; media: MediaState };
+export type CallSnapshot = {
+  roomId: string;
+  callId: string;
+  revision: number;
+  participants: CallParticipant[];
+};
+export type CallJoined = { session: CallSession; snapshot: CallSnapshot };
+export type IceConfiguration = {
+  iceServers: { urls: string[]; username?: string; credential?: string }[];
+  iceTransportPolicy: 'all' | 'relay';
+  turnConfigured: boolean;
+  expiresAt: string;
+};

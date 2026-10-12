@@ -52,3 +52,9 @@ Use one realtime instance until a shared ticket store, distributed coordination/
 ## Collaborative document persistence
 
 Migration 0003 is additive. First open initializes one document under room/file locks from existing text; every accepted update validates a fresh candidate, compacts it, updates the text projection/version, then commits before broadcast/ack. Candidates are destroyed after each operation, with at most eight active transactions. Snapshot storage is capped at 2 MiB and text at 200,000 UTF-16 code units. There is no durable awareness, append-only update log, historical timeline, or write-behind buffer. Offline identifiers remain valid across restart and compaction. Deployment and compatible rollback requirements are in [Phase 3](phase-3.md).
+
+## Voice and video
+
+Native WebRTC uses a four-participant mesh with a separate participation identity for each tab. Typed call events reuse the authenticated Socket.IO connection and room queue; SDP/ICE never enter document state or the database. Every signal authorizes its source and destination against current session/membership and call IDs. Explicit join, perfect negotiation, bounded ICE restart, participation leases and cleanup isolate media failures from editing/chat.
+
+The same-origin API issues short-lived coturn-compatible credentials from a server-only secret. The relay is separate infrastructure; Vercel, Render and Neon retain their existing roles. Each participant uploads up to three media copies; larger rooms need an SFU. Signaling revocation cannot forcibly cut off malicious peers already connected to each other. See [Phase 4](phase-4.md) for contracts, bounds, expiry semantics, exact deployment settings and acceptance limits.

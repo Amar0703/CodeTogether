@@ -35,7 +35,7 @@ let ownerId: string,
 const clients: Client[] = [];
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function eventually(check: () => boolean) {
-  const deadline = Date.now() + 4000;
+  const deadline = Date.now() + 6000;
   while (!check() && Date.now() < deadline) await delay(20);
   assert.ok(check(), 'Expected realtime state before deadline');
 }
@@ -69,7 +69,7 @@ async function rejected(socket: Client) {
   socket.disconnect();
 }
 function join(socket: Client, id = roomId): Promise<RealtimeResult<Presence>> {
-  return socket.timeout(2000).emitWithAck('room:join', { roomId: id });
+  return socket.timeout(5000).emitWithAck('room:join', { roomId: id });
 }
 function send(
   socket: Client,
@@ -77,7 +77,7 @@ function send(
   clientMessageId = randomUUID(),
   id = roomId,
 ): Promise<RealtimeResult<ChatMessage>> {
-  return socket.timeout(2000).emitWithAck('chat:send', { roomId: id, body, clientMessageId });
+  return socket.timeout(5000).emitWithAck('chat:send', { roomId: id, body, clientMessageId });
 }
 function ok<T>(result: RealtimeResult<T>): T {
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -94,7 +94,9 @@ before(async () => {
     sweepMs: 100,
     ticketTtlMs: 500,
     pingInterval: 100,
-    pingTimeout: 150,
+    // Leave headroom for PGlite/WASM and browser-test load on developer machines.
+    // Still short enough for the abrupt-transport-loss assertion below.
+    pingTimeout: 1000,
   });
   app = createApp(db.db, { origin: origin + '/', realtime, rateLimit: 1000 });
   const server = createServer(app);

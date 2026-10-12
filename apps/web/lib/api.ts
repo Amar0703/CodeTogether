@@ -7,9 +7,15 @@ export class ApiError extends Error {
     super(message);
   }
 }
-export async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+export async function api<T>(
+  path: string,
+  method = 'GET',
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   const response = await fetch(`/api${path}`, {
     method,
+    signal,
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'X-CodeTogether': '1' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),

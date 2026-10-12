@@ -42,3 +42,7 @@ See [Phase 2 contracts](phase-2.md#shared-contracts) for socket events, acknowle
 ## Phase 3 documents
 
 The existing same-origin ticket endpoint authenticates all collaboration. See [document/awareness event contracts](phase-3.md#document-and-awareness-contracts). HTTP PATCH /api/files/:fileId retains VERSION_CONFLICT checks until the first collaborative open, then rejects snapshot saves with 409 COLLABORATIVE_DOCUMENT. GET content is the last committed text projection; unsent local edits are available only in that browser. Document updates commit their snapshot, projection and version together before acknowledgment.
+
+## Phase 4 calls
+
+`POST /api/rooms/:roomId/ice` returns authorized, temporary ICE configuration through the same-origin proxy. It requires session, CSRF checks and current room membership, is limited to 12 requests/user/minute, and uses private/no-store caching headers. TURN signing secrets remain on the API. See [call contracts](phase-4.md#contracts) for participation, cancellation, media state, SDP/ICE forwarding and snapshot events. Owners, editors and viewers may call; viewers still cannot mutate documents.

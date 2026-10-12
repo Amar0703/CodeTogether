@@ -1,11 +1,11 @@
 import { connectDatabase } from '@codetogether/db';
 import { createApp } from './app.js';
-import { config } from './config.js';
+import { config, iceSettings } from './config.js';
 import { createServer } from 'node:http';
 import { Realtime } from './realtime.js';
 const connection = await connectDatabase(config.DATABASE_URL, config.PGLITE_DATA_DIR);
 if (config.NODE_ENV !== 'production') await connection.migrate();
-const realtime = new Realtime(connection.db, config.APP_ORIGIN);
+const realtime = new Realtime(connection.db, config.APP_ORIGIN, { iceSettings });
 const server = createServer(
   createApp(connection.db, {
     origin: config.APP_ORIGIN,

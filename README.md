@@ -1,6 +1,6 @@
 # CodeTogether
 
-A shared coding workspace implementing Phases 1–3 of the project blueprint. Authenticated room members edit together with Yjs, see named cursors and selections, and use persistent chat and presence without refreshing. Collaborative edits autosave after database acknowledgment and merge safely after reconnect.
+A shared coding workspace implementing Phases 1–4 of the project blueprint. Authenticated room members edit together with Yjs, use persistent chat and presence, and explicitly join small voice/video calls. Collaborative edits autosave after database acknowledgment and merge safely after reconnect. Remote-network calling requires configured TURN and deployment acceptance.
 
 ## Run locally
 
@@ -74,6 +74,16 @@ Local development uses `http://localhost:4000` for WebSockets. For production, s
 
 See [Phase 3 architecture, contracts, recovery guarantees and exact deployment steps](docs/phase-3.md). Existing Render/Vercel environment variables remain sufficient; deploy additive migration `0003_documents.sql` before the API/frontend upgrade.
 
+## Phase 4 voice and video
+
+- Explicit Join/Leave, microphone and camera controls, audio-only calls and device selection.
+- Four media participants per room, including viewers; each tab occupies its own slot.
+- Authenticated signaling, perfect negotiation, bounded ICE recovery and access-revocation cleanup.
+- Short-lived coturn-compatible credentials issued by the API; no TURN secret reaches the browser.
+- Fake-device tests check received RTP and decoded video alongside editing, chat and viewer restrictions.
+
+See [Phase 4 architecture, exact environment variables, TURN setup and deployment checklist](docs/phase-4.md). TURN is an additional external service; the existing Render web service is not a relay. No Phase 4 database migration is needed.
+
 ## Commands and checks
 
 ```sh
@@ -101,4 +111,4 @@ tests             Two-browser-context acceptance test
 
 See [architecture](docs/architecture.md), [API](docs/api.md), [Phase 1 history](docs/phase-1.md), and [Phase 2 deployment and acceptance](docs/phase-2.md).
 
-WebRTC, code execution, queues, AI, Git integration, multiple realtime instances and version-history browsing remain deferred. CRDT persistence preserves convergence, not a user-facing historical timeline.
+Screen sharing, recording, transcription, SFUs, code execution, queues, AI, Git integration, multiple realtime instances and version-history browsing remain deferred. CRDT persistence preserves convergence, not a user-facing historical timeline.

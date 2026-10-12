@@ -1861,6 +1861,138 @@ form {
 }
 
 /* Keep the conversation and its composer visible independently of the member list. */
+.room-call {
+  flex-shrink: 0;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: #121820;
+  max-height: 38vh;
+  overflow-y: auto;
+}
+.call-heading,
+.call-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.call-heading {
+  font-size: 13px;
+}
+.call-heading strong {
+  margin-right: auto;
+}
+.call-heading strong span,
+.call-hint,
+.call-caption span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.call-controls {
+  margin-top: 8px;
+}
+.call-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.call-controls select {
+  max-width: 180px;
+  padding: 4px;
+  font-size: 11px;
+}
+.call-camera-option input {
+  width: auto;
+}
+.call-hint,
+.call-error,
+.call-warning {
+  margin: 7px 0 0;
+  font-size: 12px;
+}
+.call-error {
+  color: #fca5a5;
+}
+.call-warning {
+  color: #fcd34d;
+}
+.call-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 240px));
+  gap: 8px;
+  margin-top: 10px;
+}
+.call-tile {
+  position: relative;
+  min-width: 0;
+  height: 142px;
+  background: #1b2634;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.call-tile.speaking {
+  border-color: #4ade80;
+}
+.call-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.call-tile video.camera-hidden {
+  opacity: 0;
+}
+.call-avatar {
+  position: absolute;
+  inset: 12px 0 55px;
+  display: grid;
+  place-items: center;
+  font-size: 26px;
+}
+.call-caption {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  padding: 7px;
+  background: #101722e8;
+  font-size: 12px;
+}
+.call-caption strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.call-caption span:last-child {
+  flex-basis: 100%;
+}
+.play-media {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+}
+@media (max-width: 680px) {
+  .room-call {
+    padding: 8px;
+    max-height: 36vh;
+  }
+  .call-controls {
+    gap: 8px;
+  }
+  .call-controls select {
+    max-width: 125px;
+  }
+  .call-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .call-tile {
+    height: 126px;
+  }
+}
 .people-panel {
   display: flex;
   flex-direction: column;
@@ -1942,7 +2074,13 @@ form {
     width: min(340px, calc(100vw - 28px));
   }
   .member-roster {
-    max-height: 210px;
+    max-height: 130px;
+  }
+  .room-chat {
+    min-height: 160px;
+  }
+  .chat-messages {
+    min-height: 35px;
   }
   .connection-state {
     font-size: 9px;

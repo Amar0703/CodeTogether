@@ -205,6 +205,11 @@ export function createApp(
   app.post('/api/realtime/ticket', async (_req, res) => {
     res.json(await realtime.ticket(res.locals.sessionHash));
   });
+  app.post('/api/rooms/:roomId/ice', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Vary', 'Cookie, Origin');
+    res.json(await realtime.ice(param(req, 'roomId'), res.locals.sessionHash));
+  });
   app.get('/api/rooms/:roomId/messages', async (req, res) => {
     res.json(await realtime.history(param(req, 'roomId'), uid(res), req.query));
   });
