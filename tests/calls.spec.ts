@@ -437,12 +437,31 @@ test('credential refresh restarts ICE without reacquiring devices and blocked pl
 });
 
 test('forced TURN relay receives real media packets', async ({ browser }) => {
+  test.setTimeout(240_000);
   test.skip(
     process.env.TEST_TURN_RELAY !== '1',
     'Requires usable TURN credentials and API ICE_TRANSPORT_POLICY=relay.',
   );
   const f = await pair(browser);
   try {
+    // Metered prewarms credentials off the call path after API startup.
+    // Poll infrequently to stay below the authenticated issuance rate limit.
+    await expect
+      .poll(
+        async () => {
+          const response = await f.a.request.post(`/api/rooms/${f.roomId}/ice`, {
+            headers: f.headers,
+          });
+          if (response.ok()) {
+            const config = await response.json();
+            expect(config.turnConfigured).toBe(true);
+            expect(config.iceTransportPolicy).toBe('relay');
+          }
+          return response.status();
+        },
+        { timeout: 180_000, intervals: [15_000] },
+      )
+      .toBe(200);
     for (const page of [f.owner, f.member]) {
       await page.getByLabel('Join with camera').check();
       await page.getByRole('button', { name: 'Join call', exact: true }).click();

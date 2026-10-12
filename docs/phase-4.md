@@ -68,7 +68,7 @@ Each participant sends N−1 copies and receives N−1 streams; mesh traffic gro
 
 Run Node 22+, `npm ci`, then `npm run dev`; use **http://localhost:3000** consistently. PGlite remains in `.data/postgres`. Empty STUN/TURN defaults use host candidates, sufficient for local fake-device tests; the UI explicitly warns that remote networks may fail. These tests do not prove remote readiness.
 
-API settings belong in `apps/api/.env`; see its example. `STUN_URLS` accepts comma-separated authorized `stun:`/`stuns:` URLs. TURN settings must be supplied together. This implementation supports coturn-compatible shared-secret issuance; a provider offering only an API-key endpoint needs a separate server-side adapter. Do not put API keys into URLs or browser variables.
+API settings belong in `apps/api/.env`; see its example. `STUN_URLS` accepts comma-separated authorized `stun:`/`stuns:` URLs. TURN settings must be supplied together. Coturn-compatible shared-secret issuance and Metered temporary credentials are supported; other providers need a server-side adapter. Never put provider keys into browser variables or browser request URLs. Metered's documented management API uses a secret query parameter only in the server-to-provider request; do not enable outbound URL tracing for that request.
 
 ```sh
 npm run lint
@@ -112,13 +112,40 @@ Keep Vercel + one Render Express/Socket.IO instance + Neon. No Phase 4 database 
 | Vercel   | `API_URL`                  | `https://codetogether-p51q.onrender.com`                                                  |
 | Vercel   | `NEXT_PUBLIC_REALTIME_URL` | `https://codetogether-p51q.onrender.com`                                                  |
 
-TURN URLs/secret must both be present or absent; relay-only policy requires TURN. Invalid settings fail startup. Vercel needs no new Phase 4 variable. Never put TURN shared secrets, provider keys or database credentials in `NEXT_PUBLIC_*` or source control.
+TURN URLs require either `TURN_SHARED_SECRET` (coturn) or both Metered variables below, never both providers. Relay-only policy requires TURN. Invalid settings fail startup. Vercel needs no new Phase 4 variable. Never put TURN shared secrets, provider keys or database credentials in `NEXT_PUBLIC_*` or source control.
 
-Issuance returns a random username suffix prefixed with expiry seconds and an HMAC-SHA1/base64 password. No account ID is exposed to the relay. The browser necessarily receives ICE URLs, temporary username/password, policy and expiry to authenticate allocations; these can be copied until expiry. The signing secret stays server-side. Responses are authorized/rate-limited, not cached across users, and have distinct usernames.
+Coturn issuance returns a random username suffix prefixed with expiry seconds and an HMAC-SHA1/base64 password. No application user ID is exposed to the relay. The browser necessarily receives ICE URLs, temporary username/password, policy and expiry to authenticate allocations; these can be copied until expiry. The signing secret stays server-side. Responses are authorized/rate-limited, not cached across users, and have distinct usernames.
 
 The client refreshes 60 seconds before expiry, updates peer ICE configuration and restarts ICE. Requests time out after eight seconds and retry twice at five-second intervals; final failure ends calling visibly. Reconnect always fetches fresh credentials. Relay allocation lifetime is provider-controlled: credential expiry is not an immediate kill guarantee. Keep API/relay clocks synchronized and configure relay traffic quotas and spending limits.
 
 ## External TURN requirements
+
+### Metered without buying a domain or server
+
+The inspected account on 12 October 2026 offered a **500 MB free trial**, with no overages: relay service stops at the limit. Its 20 GB plan required a payment method, so it was not selected. Pricing and account eligibility can change; confirm the dashboard before enabling anything. The free trial's full API access supports temporary credentials.
+
+In Render, use these variables instead of `TURN_SHARED_SECRET`:
+
+```dotenv
+METERED_DOMAIN=codetogether-amar.metered.live
+METERED_SECRET_KEY=<private secret from Metered Developers>
+STUN_URLS=stun:stun.relay.metered.ca:80
+TURN_URLS=turn:global.relay.metered.ca:80,turn:global.relay.metered.ca:80?transport=tcp,turns:global.relay.metered.ca:443?transport=tcp
+TURN_TTL_SECONDS=600
+ICE_TRANSPORT_POLICY=all
+```
+
+The domain and relay URLs above match the inspected trial account. Other accounts must use their own domain and supported relay region. `METERED_SECRET_KEY` is the existing **Developers secret**, not the credential-scoped key under “Show API Key,” and not the displayed TURN password. The backend needs it to create expiring credentials. Projects were unavailable in the inspected account, so this secret has application-wide privileges; restrict it to the API's secret configuration. No new frontend environment variable is needed.
+
+Metered credentials can take **two minutes to propagate**. The API prepares them in the background, waits 120 seconds after creation, then hands each unused credential to exactly one authorized ICE response. It holds at most 32 unused credentials while maintaining a target of 16 with enough remaining lifetime, starts replacement creation early, and never shares an assigned credential across users/responses. Pool exhaustion/startup returns `503 MEDIA_UNAVAILABLE` with a visible retry message. Editing/chat continue. After Render restarts or wakes from sleep, allow at least two minutes before joining; restart recovery may exceed the client's 30-second capture window, requiring an explicit Join.
+
+Metered TTL is 600–3600 seconds. Items with under three minutes remaining are discarded; replacement preparation begins with six minutes remaining. Each provider request has a five-second timeout, 16 KiB response cap, schema validation and redirect rejection. There is one request in flight and at most 16 creations per refill, with a 30-second retry delay on failure. Responses, request URLs and provider errors are never logged. Shutdown aborts the request and clears unused credentials and timers; already-created provider credentials expire naturally. They can remain as expired entries in the Metered dashboard.
+
+Metered documents credential expiry as a hard cutoff, including active allocations. The client refreshes 60 seconds early and restarts ICE with another already-propagated credential; failures end calling visibly. Long calls across a real expiry still require acceptance testing. This intentionally uses shorter lifetimes and unique response credentials than Metered's general shared-credential rotation example. See [credential creation](https://www.metered.ca/docs/turn-rest-api/post-create-credential/) and [propagation/rotation semantics](https://www.metered.ca/docs/turnserver-guides/rotating-turn-credentials/).
+
+For local testing, put the variables in `apps/api/.env`, or a Git-ignored `apps/api/.env.metered.local` and set `DOTENV_CONFIG_PATH` to its absolute path before `npm run dev`. Turbo forwards all ICE settings and the custom dotenv path. Use `ICE_TRANSPORT_POLICY=relay` only for forced-relay testing, then restore `all`. A one-time dashboard credential is not used by this adapter; temporary credentials are created through the management API.
+
+### Self-hosted coturn
 
 Choose an existing coturn-compatible service or separate coturn host. No resource or purchase was provisioned. Render forwards public traffic to one HTTP port, so the existing web service is not the TURN relay. See [Render's port constraints](https://render.com/docs/web-services#binding-to-multiple-ports).
 
@@ -154,4 +181,14 @@ Verified locally on Windows with Node and Chromium on 12 October 2026:
 - The credential-renewal/playback scenario passed three additional consecutive runs after investigating an earlier intermittent connection failure.
 - Desktop and mobile screenshots were inspected, including mobile editor and chat views during a call.
 
-The forced-TURN test was skipped because usable relay credentials were unavailable. Physical devices, different networks, Firefox/Safari, hosted deployment/CI, Neon/PostgreSQL-server tests, real TURN credential expiry and deployed Render restart were **not tested**. No push, deployment or paid resource provisioning was performed. The blueprint's remote-user exit criterion stays pending until external TURN and real-network acceptance pass.
+At the initial Phase 4 milestone, forced TURN was skipped because usable relay credentials were unavailable. Physical devices, different networks, Firefox/Safari, hosted deployment/CI, Neon/PostgreSQL-server tests, real TURN credential expiry and deployed Render restart were **not tested**. No push, deployment or paid resource provisioning was performed.
+
+### Metered integration follow-up — 12 October 2026
+
+- Created the requested dashboard credential on the existing no-card 500 MB trial. No paid plan or payment method was activated. The API adapter uses the Developers secret to prepare separate expiring credentials, not this manual credential.
+- `npm test`: **42 passed**, including five Metered pool/configuration tests and a route integration test for authenticated, uncached warmup errors and distinct credential responses. TypeScript, lint and production build passed.
+- `TEST_TURN_RELAY=1 npm run test:e2e -- tests/calls.spec.ts -g 'forced TURN relay'`: **1 passed** using the real Metered service. Both authenticated Chromium contexts received fake-device audio RTP and decoded video, and selected local relay candidates with `iceTransportPolicy=relay`. This was a short call between two contexts on one Windows machine, not a physical-device or different-network test. The full eight-test browser suite from the initial milestone was not rerun for this backend-only follow-up.
+- Temporary credentials were successfully generated and propagated through Metered. The local test service was stopped afterward, and the ignored local configuration restored to `ICE_TRANSPORT_POLICY=all`. Provider secrets were not committed or deployed.
+- A separate provider-response diagnostic request was rejected by automatic approval review and was not retried. The already-running relay test then completed successfully, so that diagnostic was unnecessary.
+
+Real expiry during a long call, physical devices, different networks and production deployment acceptance remain pending. The blueprint's remote-user exit criterion is not yet claimed complete.
