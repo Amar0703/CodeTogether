@@ -27,6 +27,7 @@ import { api, ApiError, message } from '../lib/api';
 import { Avatar, ErrorBanner, Loading, Modal } from './ui';
 import { useRoomRealtime } from '../lib/realtime';
 import { Chat } from './chat';
+import { CallPanel } from './call';
 import { DraftRecovery } from './recovery';
 import { CollaborativeDocument, type DocumentStatus } from '../lib/document';
 const Editor = dynamic(() => import('./editor'), { ssr: false, loading: () => <Loading /> });
@@ -387,6 +388,12 @@ export function Workspace({ id }: { id: string }) {
           )}
         </div>
       </header>
+      <CallPanel
+        roomId={id}
+        socket={realtime.socket}
+        ready={realtime.status === 'Connected'}
+        revoked={accessRemoved}
+      />
       <div className="studio-body">
         <aside className="file-panel">
           <div className="panel-heading">
