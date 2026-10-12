@@ -33,6 +33,7 @@ import { hashToken, token } from './security.js';
 import { normalizeOrigin } from './origin.js';
 import { DocumentStore } from './documents.js';
 import { iceEnvironmentSchema, issueIce, type IceSettings } from './ice.js';
+import { MeteredPool } from './metered.js';
 
 export class RealtimeError extends Error {
   constructor(
@@ -82,6 +83,7 @@ export class Realtime {
   private calls = new Map<string, { id: string; revision: number }>();
   readonly origin: string;
   private documents: DocumentStore;
+  private metered?: MeteredPool;
   constructor(
     private db: Database,
     origin: string,
@@ -92,11 +94,21 @@ export class Realtime {
       pingTimeout?: number;
       actionLimit?: number;
       iceSettings?: IceSettings;
+      meteredTransport?: typeof fetch;
+      meteredNow?: () => number;
       callLeaseMs?: number;
     } = {},
   ) {
     this.origin = normalizeOrigin(origin);
     this.documents = new DocumentStore(db);
+    if (options.iceSettings?.METERED_SECRET_KEY) {
+      this.metered = new MeteredPool(
+        options.iceSettings,
+        options.meteredTransport,
+        options.meteredNow,
+      );
+      this.metered.start();
+    }
   }
 
   // Also used by HTTP mutations: revocation, joins, sends and broadcasts cannot overtake each other.
@@ -150,6 +162,17 @@ export class Realtime {
       const identity = await this.session(sessionHash);
       await this.membership(this.db, roomId, identity.userId);
       this.rate(`ice:${identity.userId}`, 12);
+      if (this.metered) {
+        try {
+          return this.metered.take();
+        } catch {
+          throw new RealtimeError(
+            'MEDIA_UNAVAILABLE',
+            'TURN is warming up or unavailable. Wait two minutes, then join again.',
+            503,
+          );
+        }
+      }
       return issueIce(this.options.iceSettings ?? iceEnvironmentSchema.parse({}));
     });
   }
@@ -758,6 +781,7 @@ export class Realtime {
     });
   }
   async close() {
+    this.metered?.close();
     clearInterval(this.timer);
     await new Promise<void>((resolve) => (this.io ? this.io.close(() => resolve()) : resolve()));
     await Promise.allSettled([...this.locks.values()]);

@@ -12,7 +12,15 @@
         "API_HOST",
         "API_URL",
         "NEXT_PUBLIC_REALTIME_URL",
-        "NODE_ENV"
+        "NODE_ENV",
+        "DOTENV_CONFIG_PATH",
+        "STUN_URLS",
+        "TURN_URLS",
+        "TURN_SHARED_SECRET",
+        "TURN_TTL_SECONDS",
+        "ICE_TRANSPORT_POLICY",
+        "METERED_DOMAIN",
+        "METERED_SECRET_KEY"
       ]
     },
     "build": {

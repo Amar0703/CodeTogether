@@ -79,7 +79,7 @@ See [Phase 3 architecture, contracts, recovery guarantees and exact deployment s
 - Explicit Join/Leave, microphone and camera controls, audio-only calls and device selection.
 - Four media participants per room, including viewers; each tab occupies its own slot.
 - Authenticated signaling, perfect negotiation, bounded ICE recovery and access-revocation cleanup.
-- Short-lived coturn-compatible credentials issued by the API; no TURN secret reaches the browser.
+- Short-lived coturn-compatible or Metered credentials issued by the API; provider secrets stay server-side.
 - Fake-device tests check received RTP and decoded video alongside editing, chat and viewer restrictions.
 
 See [Phase 4 architecture, exact environment variables, TURN setup and deployment checklist](docs/phase-4.md). TURN is an additional external service; the existing Render web service is not a relay. No Phase 4 database migration is needed.

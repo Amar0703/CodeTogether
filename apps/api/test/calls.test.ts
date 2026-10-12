@@ -287,6 +287,53 @@ test('ICE issuance validates configuration, uses expiring HMAC credentials, enfo
   await f.viewer.post(path).set(headers).expect(429);
 });
 
+test('Metered ICE route preserves authentication and no-store on warmup, then issues distinct credentials', async () => {
+  let now = Date.now(),
+    issued = 0;
+  const metered = new Realtime(db.db, origin, {
+    iceSettings: iceEnvironmentSchema.parse({
+      METERED_DOMAIN: 'example.metered.live',
+      METERED_SECRET_KEY: 'test-only-metered-management-secret',
+      TURN_URLS: 'turn:global.relay.metered.ca:80',
+    }),
+    meteredNow: () => now,
+    meteredTransport: async () =>
+      Response.json({ username: `u-${++issued}`, password: 'test-password', expiryInSeconds: 600 }),
+  });
+  const mediaApp = createApp(db.db, { origin, realtime: metered });
+  try {
+    const owner = request.agent(mediaApp);
+    await owner
+      .post('/api/auth/signup')
+      .set(headers)
+      .send({
+        name: 'Metered user',
+        email: `${randomUUID()}@example.com`,
+        password: 'metered test password',
+      })
+      .expect(201);
+    const roomId = (
+      await owner.post('/api/rooms').set(headers).send({ name: 'Metered test' }).expect(201)
+    ).body.room.id;
+    const path = `/api/rooms/${roomId}/ice`;
+    await request(mediaApp).post(path).set(headers).expect(401);
+    await owner.post(path).expect(403);
+    const warmup = await owner.post(path).set(headers).expect(503);
+    assert.equal(warmup.body.error.code, 'MEDIA_UNAVAILABLE');
+    assert.match(warmup.headers['cache-control'], /no-store/);
+    assert.equal(issued, 16);
+    now += 120_000;
+    const a = await owner.post(path).set(headers).expect(200);
+    const b = await owner.post(path).set(headers).expect(200);
+    assert.notEqual(a.body.iceServers[0].username, b.body.iceServers[0].username);
+    assert.equal(a.body.turnConfigured, true);
+    assert.match(a.headers['cache-control'], /private, no-store/);
+    assert.equal(JSON.stringify(a.body).includes('management-secret'), false);
+  } finally {
+    await metered.close();
+  }
+});
+
 test('join retries are idempotent, cancellation rejects delayed joins, and candidate-before-SDP delivery is bounded', async () => {
   const f = await fixture(),
     a = await f.connect(),
