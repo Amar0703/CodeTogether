@@ -1994,17 +1994,19 @@ form {
   }
 }
 .people-panel {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  display: grid;
+  grid-template-rows: 51px minmax(60px, 1fr) minmax(240px, 1.5fr);
+  min-height: 0;
+  /* Extremely short windows/virtual keyboards still allow reaching the composer. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding-bottom: 0;
 }
 .people-panel > .panel-heading {
   flex-shrink: 0;
 }
 .member-roster {
-  max-height: 265px;
-  flex-shrink: 0;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -2053,16 +2055,19 @@ form {
   display: flex;
   flex-direction: column;
   flex: 1;
-  min-height: 220px;
-  margin-top: 8px;
+  min-height: 0;
+  margin-top: 0;
 }
 .chat-messages {
   flex: 1;
-  min-height: 50px;
+  min-height: 0;
   max-height: none;
 }
 .chat-compose {
   flex-shrink: 0;
+}
+.chat-compose textarea {
+  max-height: 96px;
 }
 @media (max-width: 1100px) and (min-width: 681px) {
   .people-panel {
@@ -2072,15 +2077,8 @@ form {
 @media (max-width: 680px) {
   .people-panel {
     width: min(340px, calc(100vw - 28px));
-  }
-  .member-roster {
-    max-height: 130px;
-  }
-  .room-chat {
-    min-height: 160px;
-  }
-  .chat-messages {
-    min-height: 35px;
+    /* Larger touch-friendly textarea text needs more composer space. */
+    grid-template-rows: 51px minmax(60px, 1fr) minmax(270px, 1.5fr);
   }
   .connection-state {
     font-size: 9px;

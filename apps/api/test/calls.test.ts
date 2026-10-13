@@ -319,9 +319,10 @@ test('Metered ICE route preserves authentication and no-store on warmup, then is
     await request(mediaApp).post(path).set(headers).expect(401);
     await owner.post(path).expect(403);
     const warmup = await owner.post(path).set(headers).expect(503);
-    assert.equal(warmup.body.error.code, 'MEDIA_UNAVAILABLE');
+    assert.equal(warmup.body.error.code, 'MEDIA_WARMING_UP');
+    assert.match(warmup.body.error.message, /120 seconds/);
     assert.match(warmup.headers['cache-control'], /no-store/);
-    assert.equal(issued, 16);
+    assert.equal(issued, 4);
     now += 120_000;
     const a = await owner.post(path).set(headers).expect(200);
     const b = await owner.post(path).set(headers).expect(200);
