@@ -1,0 +1,48 @@
+# Dedicated Linux sandbox host only. Never run this on the Render API service.
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/execution-worker.Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      REDIS_URL: ${REDIS_URL:?Set the execution Redis TLS URL}
+      EXECUTION_API_URL: https://codetogether-p51q.onrender.com
+      EXECUTION_WORKER_TOKEN: ${EXECUTION_WORKER_TOKEN:?Set the API worker protocol secret}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:?Set the approved sandbox image digest}
+      SANDBOX_RUNTIME: runsc
+    volumes: ['/var/run/docker.sock:/var/run/docker.sock']
+    depends_on:
+      janitor: { condition: service_healthy }
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: { max-size: '5m', max-file: '2' }
+  janitor:
+    build:
+      context: ..
+      dockerfile: infra/execution-worker.Dockerfile
+    command: ['node', '--import', 'tsx', 'apps/execution-worker/src/janitor.ts']
+    restart: unless-stopped
+    labels: { io.codetogether.watchdog: 'v1' }
+    volumes: ['/var/run/docker.sock:/var/run/docker.sock']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          'process.exit(Date.now()-Number(require("fs").readFileSync("/tmp/ct-janitor-alive","utf8"))<5000?0:1)',
+        ]
+      interval: 2s
+      timeout: 1s
+      retries: 2
+    mem_limit: 256m
+    cpus: 0.25
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options: { max-size: '5m', max-file: '2' }

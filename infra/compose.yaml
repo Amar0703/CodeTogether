@@ -33,7 +33,7 @@ services:
       NODE_ENV: development
       REDIS_URL: redis://redis:6379
       EXECUTION_API_URL: http://host.docker.internal:4000
-      EXECUTION_WORKER_TOKEN: ${EXECUTION_WORKER_TOKEN:?Set a random shared worker token of at least 48 characters}
+      EXECUTION_WORKER_TOKEN: ${EXECUTION_WORKER_TOKEN:-}
       SANDBOX_IMAGE: codetogether-sandbox:local
       SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-runsc}
       SANDBOX_ALLOW_LOCAL_RUNC: ${SANDBOX_ALLOW_LOCAL_RUNC:-false}
@@ -51,6 +51,17 @@ services:
     command: ['node', '--import', 'tsx', 'apps/execution-worker/src/janitor.ts']
     restart: unless-stopped
     labels: { io.codetogether.watchdog: 'v1' }
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          'process.exit(Date.now()-Number(require("fs").readFileSync("/tmp/ct-janitor-alive","utf8"))<5000?0:1)',
+        ]
+      interval: 2s
+      timeout: 1s
+      retries: 2
     volumes: ['/var/run/docker.sock:/var/run/docker.sock']
   postgres:
     image: postgres:17-alpine

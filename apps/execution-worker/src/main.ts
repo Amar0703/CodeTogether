@@ -29,9 +29,11 @@ if (
   throw new Error('Production requires runsc; local runc requires explicit opt-in');
 if (
   env.NODE_ENV === 'production' &&
-  (!env.EXECUTION_API_URL.startsWith('https://') || !env.SANDBOX_IMAGE.includes('@sha256:'))
+  (!env.EXECUTION_API_URL.startsWith('https://') ||
+    !env.REDIS_URL.startsWith('rediss://') ||
+    !env.SANDBOX_IMAGE.includes('@sha256:'))
 )
-  throw new Error('Production requires HTTPS API and an immutable sandbox image digest');
+  throw new Error('Production requires HTTPS API, TLS Redis and an immutable sandbox image digest');
 const docker = new Docker({ socketPath: env.DOCKER_SOCKET, timeout: 5000 });
 const sandbox = new DockerSandbox(docker, env.SANDBOX_IMAGE, env.SANDBOX_RUNTIME);
 await sandbox.ready();
@@ -42,6 +44,7 @@ const control = redisConnection(env.REDIS_URL);
 control.on('error', () => {});
 const active = new Set<AbortController>();
 let stopping = false;
+let readyUntil = 0;
 async function call<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(
     `${env.EXECUTION_API_URL.replace(/\/$/, '')}/api/internal/executions/${path}`,
@@ -62,6 +65,8 @@ async function call<T>(path: string, body: unknown): Promise<T> {
 const worker = new Worker(
   executionQueue,
   async (job) => {
+    if (stopping || Date.now() >= readyUntil)
+      throw new Error('Execution infrastructure unavailable');
     const { executionId } = workerClaimSchema.parse(job.data);
     // Infrastructure failures before claiming may retry. A lost claim ack never starts a sandbox.
     const { claim } = await call<{ claim: WorkerClaim | null }>('claim', { executionId });
@@ -103,11 +108,19 @@ const worker = new Worker(
       active.delete(abort);
     }
   },
-  { connection, concurrency: 1, lockDuration: 30_000, maxStalledCount: 1, maxStartedAttempts: 2 },
+  {
+    connection,
+    autorun: false,
+    concurrency: 1,
+    lockDuration: 30_000,
+    maxStalledCount: 1,
+    maxStartedAttempts: 2,
+  },
 );
 worker.on('error', () => {});
 worker.on('failed', (job) => console.warn('Execution delivery failed', { executionId: job?.id }));
 let checking = false;
+let started = false;
 const readiness = setInterval(async () => {
   if (checking || stopping) return;
   checking = true;
@@ -117,9 +130,19 @@ const readiness = setInterval(async () => {
     const watchdogs = await docker.listContainers({
       filters: JSON.stringify({ label: ['io.codetogether.watchdog=v1'] }),
     });
-    if (!watchdogs.length) throw new Error('Independent cleanup service required');
+    const healthy = await Promise.all(watchdogs.map((w) => docker.getContainer(w.Id).inspect()));
+    if (!healthy.some((w) => w.State.Health?.Status === 'healthy'))
+      throw new Error('Healthy independent cleanup service required');
+    await call('ready', {});
+    readyUntil = Date.now() + 4000;
     await control.set(workerHeartbeatKey, 'ready', 'EX', 5);
+    if (!started) {
+      started = true;
+      void worker.run().catch(() => console.warn('Execution consumer stopped'));
+    }
   } catch {
+    readyUntil = 0;
+    for (const controller of active) controller.abort();
     await control.del(workerHeartbeatKey).catch(() => {});
   } finally {
     checking = false;
@@ -140,4 +163,4 @@ for (const signal of ['SIGINT', 'SIGTERM'])
         process.exit(0);
       });
   });
-console.log('Execution worker started; sandbox controls verified');
+console.log('Execution worker initialized; waiting for infrastructure readiness');

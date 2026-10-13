@@ -1,5 +1,6 @@
 import Docker from 'dockerode';
 import { PassThrough } from 'node:stream';
+import type { Socket } from 'node:net';
 import {
   executionLimits as L,
   executionResultSchema,
@@ -95,7 +96,9 @@ export class DockerSandbox {
         await this.docker
           .getContainer(info.Id)
           .remove({ force: true, v: true })
-          .catch(() => {});
+          .catch((error: unknown) => {
+            if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+          });
     }
   }
   async close() {
@@ -143,6 +146,9 @@ export class DockerSandbox {
         stderr: true,
         hijack: true,
       });
+      // The hijacked Docker stream is a socket. Independent phase timers govern it;
+      // the short HTTP control timeout must not terminate a quiet C++ compilation.
+      (stream as Socket).setTimeout(0);
       let ended = false;
       const drained = new Promise<void>((resolve) => {
         const done = () => {
@@ -205,8 +211,10 @@ export class DockerSandbox {
             for (let text of splitOutput(packet.text.replaceAll('\0', '\uFFFD'))) {
               if (sequence >= L.chunks || bytes >= L.outputBytes) {
                 truncated = true;
+                void remove();
                 break;
               }
+              if (Buffer.byteLength(text) > L.outputBytes - bytes) truncated = true;
               text = fitBytes(text, L.outputBytes - bytes);
               bytes += Buffer.byteLength(text);
               const chunk: OutputChunk = { stream: packet.stream, text, sequence: ++sequence };
@@ -238,7 +246,12 @@ export class DockerSandbox {
         JSON.stringify({ language: claim.language, source: claim.source, stdin: claim.stdin }) +
           '\n',
       );
-      await container.wait();
+      let state = (await container.inspect()).State;
+      while (state.Running) {
+        signal.throwIfAborted();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        state = (await container.inspect()).State;
+      }
       clearTimeout(phaseTimer);
       clearTimeout(timer);
       // Docker attach EOF can trail wait(). Drain before accepting final status.
@@ -262,7 +275,11 @@ export class DockerSandbox {
     } catch {
       return {
         status: signal.aborted ? 'CANCELLED' : timedOut ? 'TIMED_OUT' : 'FAILED',
-        failure: signal.aborted ? 'USER_CANCELLED' : timedOut ? 'RESOURCE_LIMIT' : 'INFRASTRUCTURE',
+        failure: signal.aborted
+          ? 'USER_CANCELLED'
+          : timedOut || truncated
+            ? 'RESOURCE_LIMIT'
+            : 'INFRASTRUCTURE',
         exitCode: null,
         durationMs: Math.min(Date.now() - started, 60000),
         truncated,

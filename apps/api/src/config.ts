@@ -32,6 +32,12 @@ if (config.EXECUTION_ENABLED === 'true' && (!config.REDIS_URL || !config.EXECUTI
   throw new Error('Execution requires REDIS_URL and EXECUTION_WORKER_TOKEN');
 if (
   config.NODE_ENV === 'production' &&
+  config.EXECUTION_ENABLED === 'true' &&
+  !config.REDIS_URL?.startsWith('rediss://')
+)
+  throw new Error('Production execution requires TLS Redis');
+if (
+  config.NODE_ENV === 'production' &&
   (!config.DATABASE_URL || !config.APP_ORIGIN.startsWith('https://'))
 )
   throw new Error('Production requires DATABASE_URL and an HTTPS APP_ORIGIN');

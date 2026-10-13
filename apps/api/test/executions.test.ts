@@ -2,7 +2,12 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
+import * as Y from 'yjs';
+import { DocumentStore } from '../src/documents.js';
+import { createServer } from 'node:http';
+import { io } from 'socket.io-client';
+import { Realtime } from '../src/realtime.js';
 import { connectDatabase, executions, files, sessions } from '@codetogether/db';
 import {
   executionSubmitSchema,
@@ -359,24 +364,211 @@ test('bounded output, pagination, availability failures and no sensitive socket 
   assert.equal(stored.outputBytes, 65536);
 });
 test('outbox repairs enqueue/ack loss and Redis data loss; exhausted deliveries stay terminal', async () => {
-  const f = await fixture(), r = await submit(f);
-  const jobs = new Map<string, string>(); let fail = true, calls = 0;
+  const f = await fixture(),
+    r = await submit(f);
+  const jobs = new Map<string, string>();
+  let fail = true,
+    calls = 0;
   const queue: DispatchQueue = {
-    async getJob(id) { return jobs.has(id) ? { async getState() { return jobs.get(id)!; } } : undefined; },
+    async getJob(id) {
+      return jobs.has(id)
+        ? {
+            async getState() {
+              return jobs.get(id)!;
+            },
+          }
+        : undefined;
+    },
     async add(_name, data, options) {
-      calls++; assert.equal(options.attempts, 2);
+      calls++;
+      assert.equal(options.attempts, 2);
       jobs.set(data.executionId, 'waiting'); // Simulate Redis commit followed by lost acknowledgment.
       if (fail) throw new Error('lost Redis acknowledgment');
     },
   };
   await assert.rejects(dispatchPending(db.db, queue, service), /acknowledgment/);
   const [pending] = await db.db.select().from(executions).where(eq(executions.id, r.id));
-  assert.equal(pending.dispatchedAt, null); assert.equal(pending.status, 'QUEUED');
-  fail = false; await dispatchPending(db.db, queue, service); assert.equal(jobs.size, 1);
-  jobs.clear(); await db.db.update(executions).set({ dispatchedAt: new Date(0) }).where(eq(executions.id, r.id));
-  await dispatchPending(db.db, queue, service); assert.equal(jobs.size, 1); assert.ok(calls >= 3);
-  jobs.set(r.id, 'failed'); await db.db.update(executions).set({ dispatchedAt: new Date(0) }).where(eq(executions.id, r.id));
+  assert.equal(pending.dispatchedAt, null);
+  assert.equal(pending.status, 'QUEUED');
+  fail = false;
+  await dispatchPending(db.db, queue, service);
+  assert.equal(jobs.size, 1);
+  jobs.clear();
+  await db.db
+    .update(executions)
+    .set({ dispatchedAt: new Date(0) })
+    .where(eq(executions.id, r.id));
+  await dispatchPending(db.db, queue, service);
+  assert.equal(jobs.size, 1);
+  assert.ok(calls >= 3);
+  jobs.set(r.id, 'failed');
+  await db.db
+    .update(executions)
+    .set({ dispatchedAt: new Date(0) })
+    .where(eq(executions.id, r.id));
   await dispatchPending(db.db, queue, service);
   assert.equal((await service.get(f.roomId, r.id, f.identities.owner)).failure, 'INFRASTRUCTURE');
   assert.equal(await service.claim(r.id), null);
+});
+test('acknowledged Yjs projection is required; older visible hashes never execute newer text', async () => {
+  const f = await fixture();
+  const documents = new DocumentStore(db.db);
+  const initial = await documents.sync(f.roomId, f.file.id, {}, async () => 'OWNER');
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, Buffer.from(initial.update, 'base64'));
+  const text = doc.getText('content');
+  text.delete(0, text.length);
+  text.insert(0, 'console.log("acknowledged")');
+  const ack = await documents.sync(
+    f.roomId,
+    f.file.id,
+    { update: Buffer.from(Y.encodeStateAsUpdate(doc)).toString('base64') },
+    async () => 'OWNER',
+  );
+  await f.owner.post(f.path).set(headers).send(f.input).expect(409);
+  const accepted = await f.owner
+    .post(f.path)
+    .set(headers)
+    .send({ ...f.input, sourceHash: sourceHash(text.toString()), version: ack.version })
+    .expect(202);
+  const claim = await service.claim(accepted.body.execution.id);
+  assert.ok(claim);
+  assert.equal(claim.source, text.toString());
+  await service.update(claim.executionId, claim.attempt, undefined, success);
+  doc.destroy();
+});
+test('room and global admission ceilings and rolling submission rate survive completed runs', async () => {
+  const f = await fixture();
+  const runs = [
+    await submit(f),
+    await submit(f),
+    await submit(f, f.editor),
+    await submit(f, f.editor),
+  ];
+  await f.owner
+    .patch(`/api/rooms/${f.roomId}/members/${f.identities.viewer}`)
+    .set(headers)
+    .send({ role: 'EDITOR' })
+    .expect(204);
+  await f.viewer
+    .post(f.path)
+    .set(headers)
+    .send({ ...f.input, idempotencyKey: randomUUID() })
+    .expect(429);
+  for (const r of runs) await service.cancel(f.roomId, r.id, f.identities.owner);
+  for (let n = 0; n < 8; n++) {
+    const r = await submit(f);
+    await service.cancel(f.roomId, r.id, f.identities.owner);
+  }
+  await f.owner
+    .post(f.path)
+    .set(headers)
+    .send({ ...f.input, idempotencyKey: randomUUID() })
+    .expect(429);
+  const fresh = await fixture();
+  const r = await submit(fresh);
+  const [row] = await db.db.select().from(executions).where(eq(executions.id, r.id));
+  const ids = Array.from({ length: 63 }, () => randomUUID());
+  await db.db
+    .insert(executions)
+    .values(ids.map((id) => ({ ...row, id, sequence: undefined, idempotencyKey: randomUUID() })));
+  try {
+    await fresh.editor
+      .post(fresh.path)
+      .set(headers)
+      .send({ ...fresh.input, idempotencyKey: randomUUID() })
+      .expect(429);
+  } finally {
+    await db.db.delete(executions).where(inArray(executions.id, ids));
+    await service.cancel(fresh.roomId, r.id, fresh.identities.owner);
+  }
+});
+test('worker HTTP protocol validates attempts and payloads; socket output stops after access removal', async () => {
+  const f = await fixture(),
+    realtime = new Realtime(db.db, origin);
+  const emitting = new ExecutionService(
+    db.db,
+    async () => true,
+    (e) => realtime.publishExecution(e),
+  );
+  const server = createServer(
+    createApp(db.db, { origin, realtime, executions: emitting, workerToken: 'x'.repeat(64) }),
+  );
+  realtime.attach(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const socket = io(`http://127.0.0.1:${address.port}`, {
+    transports: ['websocket'],
+    auth: { ticket: (await realtime.ticket(f.hashes.viewer)).ticket },
+    extraHeaders: { Origin: origin },
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('connect_error', reject);
+    });
+    await socket.timeout(2000).emitWithAck('room:join', { roomId: f.roomId });
+    const received: ExecutionEvent[] = [];
+    socket.on('execution:event', (e) => received.push(e));
+    const r = await emitting.submit(
+      f.roomId,
+      { id: f.identities.owner, name: 'Owner' },
+      f.hashes.owner,
+      f.input,
+    );
+    const auth = { ...headers, Authorization: `Bearer ${'x'.repeat(64)}` };
+    const client = request(server);
+    await client
+      .post('/api/internal/executions/claim')
+      .set(auth)
+      .send({ executionId: r.id, userId: f.identities.owner })
+      .expect(400);
+    const c = (
+      await client
+        .post('/api/internal/executions/claim')
+        .set(auth)
+        .send({ executionId: r.id })
+        .expect(200)
+    ).body.claim;
+    await client
+      .post(`/api/internal/executions/${r.id}/output`)
+      .set(auth)
+      .send({ attempt: c.attempt, chunk: { sequence: 1, stream: 'stdout', text: 'first' } })
+      .expect(200);
+    const deadline = Date.now() + 2000;
+    while (!received.some((e) => e.chunk?.text === 'first') && Date.now() < deadline)
+      await new Promise((r) => setTimeout(r, 20));
+    assert.ok(received.some((e) => e.chunk?.text === 'first'));
+    await f.owner
+      .delete(`/api/rooms/${f.roomId}/members/${f.identities.viewer}`)
+      .set(headers)
+      .expect(204);
+    const count = received.length;
+    await client
+      .post(`/api/internal/executions/${r.id}/output`)
+      .set(auth)
+      .send({
+        attempt: c.attempt,
+        chunk: { sequence: 2, stream: 'stdout', text: 'secret after removal' },
+      })
+      .expect(200);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(received.length, count);
+    await client
+      .post(`/api/internal/executions/${r.id}/finish`)
+      .set(auth)
+      .send({ attempt: c.attempt, result: success })
+      .expect(200);
+    await client
+      .post(`/api/internal/executions/${r.id}/finish`)
+      .set(auth)
+      .send({ attempt: randomUUID(), result: success })
+      .expect(409);
+    const metrics = await client.get('/api/internal/executions/metrics').set(auth).expect(200);
+    assert.equal(metrics.body.retentionDays, 7);
+  } finally {
+    socket.disconnect();
+    await realtime.close();
+  }
 });

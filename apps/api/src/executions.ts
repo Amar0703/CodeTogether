@@ -59,6 +59,17 @@ export class ExecutionService {
   async health() {
     return { available: await this.available().catch(() => false), limits: L };
   }
+  async metrics() {
+    const rows = await this.db
+      .select({
+        status: executions.status,
+        count: sql<number>`count(*)::int`,
+        oldest: sql<string | null>`min(created_at)::text`,
+      })
+      .from(executions)
+      .groupBy(executions.status);
+    return { ...(await this.health()), retainedCounts: rows, retentionDays: 7 };
+  }
   private async membership(tx: Database | Tx, roomId: string, userId: string) {
     const [m] = await tx
       .select()
@@ -375,7 +386,11 @@ export class ExecutionService {
       .limit(L.globalActive);
     for (const initial of rows) {
       const row = await this.lock(initial.roomId, async (tx) => {
-        const [r] = await tx.select().from(executions).where(eq(executions.id, initial.id));
+        const [r] = await tx
+          .select()
+          .from(executions)
+          .where(eq(executions.id, initial.id))
+          .for('update');
         if (!r || !active.includes(r.status as (typeof active)[number])) return null;
         if (!(await this.authorized(tx, r))) return this.terminal(tx, r, 'CANCELLED', 'REVOKED');
         if (r.status === 'QUEUED' && Date.now() - r.createdAt.getTime() > L.queueWaitMs)

@@ -1,6 +1,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import Docker from 'dockerode';
 import { DockerSandbox, sandboxLabel } from '../src/sandbox.js';
 import type { ExecutionLanguage, OutputChunk } from '@codetogether/contracts';
@@ -93,7 +95,7 @@ test(
   },
 );
 test(
-  'REAL sandbox: cancellation and expired orphan cleanup remove containers and descendants',
+  'REAL sandbox: cancellation removes containers and descendants',
   { skip: !enabled, timeout: 30000 },
   async () => {
     const controller = new AbortController();
@@ -111,5 +113,59 @@ test(
       ).length,
       0,
     );
+  },
+);
+
+test(
+  'REAL sandbox: independent janitor cleans up after trusted worker SIGKILL',
+  { skip: !enabled, timeout: 35000 },
+  async () => {
+    // Only trusted TypeScript infrastructure runs on the host. The Python fixture runs in Docker.
+    const janitor = spawn(
+      process.execPath,
+      ['--import', 'tsx', fileURLToPath(new URL('../src/janitor.ts', import.meta.url))],
+      {
+        env: {
+          ...process.env,
+          DOCKER_SOCKET: process.env.TEST_DOCKER_SOCKET ?? '/var/run/docker.sock',
+        },
+        stdio: 'ignore',
+      },
+    );
+    const worker = spawn(
+      process.execPath,
+      ['--import', 'tsx', fileURLToPath(new URL('./orphan-fixture.ts', import.meta.url))],
+      { stdio: 'ignore' },
+    );
+    const list = () =>
+      sandbox.docker.listContainers({
+        all: true,
+        filters: JSON.stringify({ label: [`${sandboxLabel}=v1`] }),
+      });
+    try {
+      const until = Date.now() + 10000;
+      let running = false;
+      while (Date.now() < until) {
+        if ((await list()).some((c) => c.State === 'running')) {
+          running = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.ok(running, 'fixture must have started a real sandbox');
+      worker.kill('SIGKILL');
+      const deadline = Date.now() + 21000;
+      while ((await list()).length && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(
+        (await list()).length,
+        0,
+        'janitor removes sandbox without worker finally handlers',
+      );
+    } finally {
+      worker.kill('SIGKILL');
+      janitor.kill('SIGKILL');
+      await sandbox.reap(true);
+    }
   },
 );

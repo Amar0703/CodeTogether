@@ -1,4 +1,5 @@
 """Runs ONLY inside the constrained sandbox image. No host execution fallback."""
+import codecs
 import json
 import os
 import resource
@@ -38,14 +39,18 @@ def stage(args, stdin, deadline, cpu):
         poll.register(pipe, selectors.EVENT_READ, name)
     until = time.monotonic() + deadline
     timed_out = False
-    pending = {'stdout': bytearray(), 'stderr': bytearray()}
+    pending = []
+    decoders = {name: codecs.getincrementaldecoder('utf-8')(errors='replace') for name in ('stdout', 'stderr')}
     last_flush = time.monotonic()
     def flush():
-        for stream, data in pending.items():
+        for stream, data in pending:
             while data:
                 part = bytes(data[:1024])
                 del data[:1024]
-                send({'kind': 'output', 'stream': stream, 'text': part.decode('utf-8', errors='replace')})
+                text = decoders[stream].decode(part)
+                if text:
+                    send({'kind': 'output', 'stream': stream, 'text': text})
+        pending.clear()
     try:
         while poll.get_map():
             if time.monotonic() >= until:
@@ -62,12 +67,15 @@ def stage(args, stdin, deadline, cpu):
                 # Stop after aggregate output limit, including compiler diagnostics.
                 data = data[:remaining]
                 used += len(data)
-                pending[key.data].extend(data)
+                if pending and pending[-1][0] == key.data:
+                    pending[-1][1].extend(data)
+                else:
+                    pending.append((key.data, bytearray(data)))
                 if truncated:
                     break
             if truncated:
                 break
-            if time.monotonic() - last_flush >= 0.25 or sum(len(v) for v in pending.values()) >= 8192:
+            if time.monotonic() - last_flush >= 0.25 or sum(len(v) for _, v in pending) >= 8192:
                 flush()
                 last_flush = time.monotonic()
         try:
@@ -77,6 +85,10 @@ def stage(args, stdin, deadline, cpu):
             code = None
     finally:
         flush()
+        for stream, decoder in decoders.items():
+            tail = decoder.decode(b'', final=True)
+            if tail:
+                send({'kind': 'output', 'stream': stream, 'text': tail})
         # Kill process group even after its parent exits. Container removal catches setsid descendants.
         try:
             os.killpg(p.pid, signal.SIGKILL)
@@ -89,7 +101,7 @@ def stage(args, stdin, deadline, cpu):
     return code, timed_out
 
 def main():
-    data = json.loads(sys.stdin.buffer.readline(400000))
+    data = json.loads(sys.stdin.buffer.readline(600000))
     commands = {'javascript': ('main.js', ['/usr/local/bin/node', '--max-old-space-size=128', '/work/main.js']),
                 'python': ('main.py', ['/usr/bin/python3', '-I', '/work/main.py']),
                 'cpp': ('main.cpp', ['/work/program'])}

@@ -4,7 +4,7 @@ import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, eq, gt, desc } from 'drizzle-orm';
-import { ZodError } from 'zod';
+import { z, ZodError } from 'zod';
 import {
   type Database,
   users,
@@ -185,6 +185,13 @@ export function createApp(
   app.post('/api/internal/executions/claim', async (req, res) => {
     res.json({ claim: await execution.claim(workerClaimSchema.parse(req.body).executionId) });
   });
+  app.post('/api/internal/executions/ready', (req, res) => {
+    z.object({}).strict().parse(req.body);
+    res.json({ protocol: 1 });
+  });
+  app.get('/api/internal/executions/metrics', async (_req, res) =>
+    res.json(await execution.metrics()),
+  );
   for (const action of ['heartbeat', 'output', 'finish'] as const) {
     app.post(`/api/internal/executions/:id/${action}`, async (req, res) => {
       const id = idSchema.parse(req.params.id);
@@ -282,16 +289,14 @@ export function createApp(
   app.get('/api/auth/me', (_req, res) => res.json({ user: res.locals.user }));
   app.get('/api/executions/health', async (_req, res) => res.json(await execution.health()));
   app.post('/api/rooms/:roomId/executions', async (req, res) => {
-    res
-      .status(202)
-      .json({
-        execution: await execution.submit(
-          param(req, 'roomId'),
-          res.locals.user,
-          res.locals.sessionHash,
-          req.body,
-        ),
-      });
+    res.status(202).json({
+      execution: await execution.submit(
+        param(req, 'roomId'),
+        res.locals.user,
+        res.locals.sessionHash,
+        req.body,
+      ),
+    });
   });
   app.get('/api/rooms/:roomId/executions', async (req, res) =>
     res.json(await execution.history(param(req, 'roomId'), uid(res), req.query)),
@@ -300,8 +305,9 @@ export function createApp(
     res.json({ execution: await execution.get(param(req, 'roomId'), param(req, 'id'), uid(res)) }),
   );
   app.post('/api/rooms/:roomId/executions/:id/cancel', async (req, res) => {
-    if (req.body && Object.keys(req.body).length)
-      fail(400, 'VALIDATION_ERROR', 'Cancel takes no input.');
+    z.object({})
+      .strict()
+      .parse(req.body ?? {});
     res.json({
       execution: await execution.cancel(param(req, 'roomId'), param(req, 'id'), uid(res)),
     });

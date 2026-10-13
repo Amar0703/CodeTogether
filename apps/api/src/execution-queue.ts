@@ -11,23 +11,63 @@ import type { ExecutionEvent } from '@codetogether/contracts';
 
 export interface DispatchQueue {
   getJob(id: string): Promise<{ getState(): Promise<string> } | undefined>;
-  add(name: string, data: { executionId: string }, options: { jobId: string; attempts: number; backoff: { type: string; delay: number }; removeOnComplete: { age: number; count: number }; removeOnFail: { age: number; count: number } }): Promise<unknown>;
+  add(
+    name: string,
+    data: { executionId: string },
+    options: {
+      jobId: string;
+      attempts: number;
+      backoff: { type: string; delay: number };
+      removeOnComplete: { age: number; count: number };
+      removeOnFail: { age: number; count: number };
+    },
+  ): Promise<unknown>;
 }
-export async function dispatchPending(db: Database, queue: DispatchQueue, service: ExecutionService) {
-  const rows = await db.select({ id: executions.id }).from(executions).where(and(eq(executions.status, 'QUEUED'),
-    or(isNull(executions.dispatchedAt), lt(executions.dispatchedAt, new Date(Date.now() - 10_000))))).limit(64);
+export async function dispatchPending(
+  db: Database,
+  queue: DispatchQueue,
+  service: ExecutionService,
+) {
+  const rows = await db
+    .select({ id: executions.id })
+    .from(executions)
+    .where(
+      and(
+        eq(executions.status, 'QUEUED'),
+        or(
+          isNull(executions.dispatchedAt),
+          lt(executions.dispatchedAt, new Date(Date.now() - 10_000)),
+        ),
+      ),
+    )
+    .limit(64);
   for (const { id } of rows) {
     const old = await queue.getJob(id);
     if (old && ['failed', 'completed'].includes(await old.getState())) {
       // Exhausted queue delivery never resets its retry budget by replacing the job.
-      const [failed] = await db.update(executions).set({ status: 'FAILED', failure: 'INFRASTRUCTURE', finishedAt: new Date(), revision: 2 })
-        .where(and(eq(executions.id, id), eq(executions.status, 'QUEUED'))).returning();
+      const [failed] = await db
+        .update(executions)
+        .set({ status: 'FAILED', failure: 'INFRASTRUCTURE', finishedAt: new Date(), revision: 2 })
+        .where(and(eq(executions.id, id), eq(executions.status, 'QUEUED')))
+        .returning();
       if (failed) await service.publish(failed);
       continue;
     }
-    await queue.add('execute', { executionId: id }, { jobId: id, attempts: 2, backoff: { type: 'exponential', delay: 1000 },
-      removeOnComplete: { age: 3600, count: 1000 }, removeOnFail: { age: 86400, count: 1000 } });
-    await db.update(executions).set({ dispatchedAt: new Date() }).where(and(eq(executions.id, id), eq(executions.status, 'QUEUED')));
+    await queue.add(
+      'execute',
+      { executionId: id },
+      {
+        jobId: id,
+        attempts: 2,
+        backoff: { type: 'exponential', delay: 1000 },
+        removeOnComplete: { age: 3600, count: 1000 },
+        removeOnFail: { age: 86400, count: 1000 },
+      },
+    );
+    await db
+      .update(executions)
+      .set({ dispatchedAt: new Date() })
+      .where(and(eq(executions.id, id), eq(executions.status, 'QUEUED')));
   }
 }
 
