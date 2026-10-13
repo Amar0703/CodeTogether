@@ -176,6 +176,69 @@ async function inbound(page: Page, kind: 'audio' | 'video') {
       );
   }, kind);
 }
+
+async function composerFits(page: Page) {
+  const send = page.getByRole('button', { name: 'Send', exact: true });
+  // Visibility alone misses controls clipped by an overflow:hidden ancestor.
+  const bounds = await send.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    return {
+      fits: rect.top >= 0 && rect.bottom <= innerHeight && !!hit && element.contains(hit),
+      viewport: `${innerWidth}x${innerHeight}`,
+      bottom: rect.bottom,
+      hit: hit?.tagName,
+    };
+  });
+  if (!bounds.fits) await page.screenshot({ path: 'test-results/chat-layout-failed.png' });
+  expect(bounds.fits, JSON.stringify(bounds)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+}
+
+test('chat composer stays reachable in short workspaces even when TURN join fails', async ({
+  browser,
+}) => {
+  const f = await pair(browser);
+  try {
+    await f.owner.route('**/api/rooms/*/ice', (route) =>
+      route.fulfill({
+        status: 503,
+        json: {
+          error: {
+            code: 'MEDIA_PROVIDER_UNAVAILABLE',
+            message: 'TURN provider is unavailable. Check backend diagnostics.',
+          },
+        },
+      }),
+    );
+    await f.owner.getByRole('button', { name: 'Join call', exact: true }).click();
+    await expect(f.owner.getByTestId('call-status')).toHaveText('Failed');
+    await cleaned(f.owner);
+    for (const viewport of [
+      { width: 1536, height: 730 }, // 1920px desktop at 125% scale with browser chrome
+      { width: 1280, height: 600 },
+      { width: 390, height: 700 },
+    ]) {
+      await f.owner.setViewportSize(viewport);
+      await composerFits(f.owner);
+      const message = `Visible composer ${viewport.width}`;
+      await f.owner.getByLabel('Message your room').fill(message);
+      await f.owner.getByRole('button', { name: 'Send', exact: true }).click();
+      await expect(f.member.getByRole('log')).toContainText(message);
+      await f.owner.screenshot({ path: `test-results/chat-layout-${viewport.width}.png` });
+    }
+    // Landscape/virtual-keyboard-sized windows may scroll the sidebar, but never clip controls.
+    await f.owner.setViewportSize({ width: 640, height: 360 });
+    await f.owner.getByLabel('Message your room').fill('Short viewport chat');
+    await f.owner.getByRole('button', { name: 'Send', exact: true }).scrollIntoViewIfNeeded();
+    await composerFits(f.owner);
+    await f.owner.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(f.member.getByRole('log')).toContainText('Short viewport chat');
+  } finally {
+    await f.a.close();
+    await f.b.close();
+  }
+});
 test('simultaneous media joins receive audio/video, controls, collaboration, viewer safety, reconnect and leave cleanup', async ({
   browser,
 }) => {
@@ -274,8 +337,10 @@ test('simultaneous media joins receive audio/video, controls, collaboration, vie
     const id = await option.getAttribute('value');
     if (id) await member.getByLabel('Camera device').selectOption(id);
     await owner.setViewportSize({ width: 1440, height: 1000 });
+    await composerFits(owner);
     await owner.screenshot({ path: 'test-results/call-desktop.png', fullPage: true });
     await owner.setViewportSize({ width: 390, height: 844 });
+    await composerFits(owner);
     expect(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
