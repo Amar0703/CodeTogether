@@ -33,7 +33,7 @@ import { hashToken, token } from './security.js';
 import { normalizeOrigin } from './origin.js';
 import { DocumentStore } from './documents.js';
 import { iceEnvironmentSchema, issueIce, type IceSettings } from './ice.js';
-import { MeteredPool } from './metered.js';
+import { MeteredPool, MeteredUnavailableError } from './metered.js';
 
 export class RealtimeError extends Error {
   constructor(
@@ -165,10 +165,12 @@ export class Realtime {
       if (this.metered) {
         try {
           return this.metered.take();
-        } catch {
+        } catch (error) {
           throw new RealtimeError(
-            'MEDIA_UNAVAILABLE',
-            'TURN is warming up or unavailable. Wait two minutes, then join again.',
+            error instanceof MeteredUnavailableError ? error.code : 'MEDIA_UNAVAILABLE',
+            error instanceof MeteredUnavailableError
+              ? error.message
+              : 'TURN is unavailable. Try joining again shortly.',
             503,
           );
         }
