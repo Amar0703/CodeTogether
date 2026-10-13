@@ -1,0 +1,34 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { containerOptions, splitOutput, fitBytes } from '../src/sandbox.js';
+import { executionLimits, executionResultSchema } from '@codetogether/contracts';
+test('sandbox configuration has no infrastructure secrets, mounts, networks or privileges', () => {
+  const options = containerOptions('approved@sha256:abc', 'runsc', 'fixed-id');
+  assert.equal(options.User, '65534:65534');
+  assert.equal(options.NetworkDisabled, true);
+  assert.equal(options.HostConfig?.Runtime, 'runsc');
+  assert.equal(options.HostConfig?.ReadonlyRootfs, true);
+  assert.equal(options.HostConfig?.NetworkMode, 'none');
+  assert.equal(options.HostConfig?.Privileged, false);
+  assert.deepEqual(options.HostConfig?.CapDrop, ['ALL']);
+  assert.deepEqual(options.HostConfig?.SecurityOpt, ['no-new-privileges:true']);
+  assert.equal(options.HostConfig?.Memory, executionLimits.memoryBytes);
+  assert.equal(options.HostConfig?.MemorySwap, executionLimits.memoryBytes);
+  assert.equal(options.HostConfig?.PidsLimit, 32);
+  assert.equal(options.HostConfig?.NanoCpus, 1_000_000_000);
+  assert.equal(options.HostConfig?.Binds, undefined);
+  assert.equal(options.HostConfig?.Devices, undefined);
+  assert.equal(options.HostConfig?.Privileged, false);
+  assert.ok(!JSON.stringify(options).includes('REDIS'));
+  assert.ok(!JSON.stringify(options).includes('TOKEN'));
+  assert.equal(options.HostConfig?.LogConfig?.Type, 'none');
+});
+test('UTF-8 output chunks stay within byte limits without splitting Unicode', () => {
+  const text = '😀héllo'.repeat(5000);
+  const chunks = splitOutput(text);
+  assert.equal(chunks.join(''), text);
+  assert.ok(chunks.every((c) => Buffer.byteLength(c) <= 4096));
+  assert.equal(fitBytes('😀x', 3), '');
+  assert.equal(fitBytes('😀x', 4), '😀');
+  assert.equal(executionResultSchema.safeParse({ status: 'QUEUED' }).success, false);
+});

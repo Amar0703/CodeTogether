@@ -669,6 +669,12 @@ export class Realtime {
     }
     return result;
   }
+  async publishExecution(event: ExecutionEvent) {
+    await this.withRoom(event.roomId, async () => {
+      for (const socket of await this.authorizedSockets(event.roomId))
+        socket.volatile.emit('execution:event', event);
+    });
+  }
   private async presence(roomId: string): Promise<Presence> {
     const sockets = await this.authorizedSockets(roomId);
     for (const socket of sockets)
@@ -792,3 +798,4 @@ export class Realtime {
     this.limits.clear();
   }
 }
+import type { ExecutionEvent } from '@codetogether/contracts';

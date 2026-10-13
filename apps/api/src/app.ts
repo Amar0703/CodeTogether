@@ -2,7 +2,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, eq, gt, desc } from 'drizzle-orm';
 import { ZodError } from 'zod';
 import {
@@ -33,6 +33,13 @@ import {
 import { hashPassword, verifyPassword, hashToken, token } from './security.js';
 import { Realtime, RealtimeError } from './realtime.js';
 import { normalizeOrigin } from './origin.js';
+import { ExecutionService } from './executions.js';
+import {
+  workerClaimSchema,
+  workerLeaseSchema,
+  workerOutputSchema,
+  workerFinishSchema,
+} from '@codetogether/contracts';
 
 class ApiError extends Error {
   constructor(
@@ -59,11 +66,22 @@ const owner: Role[] = ['OWNER'];
 
 export function createApp(
   db: Database,
-  options: { origin: string; production?: boolean; rateLimit?: number; realtime?: Realtime },
+  options: {
+    origin: string;
+    production?: boolean;
+    rateLimit?: number;
+    realtime?: Realtime;
+    executions?: ExecutionService;
+    workerToken?: string;
+    trustedProxies?: string[];
+  },
 ) {
   options = { ...options, origin: normalizeOrigin(options.origin) };
   const realtime = options.realtime ?? new Realtime(db, options.origin);
   const app = express();
+  const execution = options.executions ?? new ExecutionService(db);
+  // Trust only explicitly configured ingress IPs/CIDRs, never a hop count or arbitrary XFF.
+  app.set('trust proxy', options.trustedProxies?.length ? options.trustedProxies : false);
   const cookieName = options.production ? '__Host-ct_session' : 'ct_session';
   const cookieOptions = {
     httpOnly: true,
@@ -97,6 +115,7 @@ export function createApp(
       limit: options.rateLimit ?? 30,
       standardHeaders: 'draft-8',
       legacyHeaders: false,
+      validate: { xForwardedForHeader: false }, // Intentionally ignore XFF unless ingress CIDRs are verified.
       skip: (req) => req.method === 'GET',
       message: {
         error: { code: 'RATE_LIMITED', message: 'Too many attempts. Please try again later.' },
@@ -151,6 +170,36 @@ export function createApp(
     }
     res.clearCookie(cookieName, cookieOptions).status(204).end();
   });
+  app.use('/api/internal/executions', (req, _res, next) => {
+    const expected = options.workerToken;
+    const supplied = req.get('Authorization')?.replace(/^Bearer /, '');
+    if (
+      !expected ||
+      !supplied ||
+      Buffer.byteLength(supplied) !== Buffer.byteLength(expected) ||
+      !timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))
+    )
+      return next(new ApiError(401, 'UNAUTHENTICATED', 'Worker authentication required.'));
+    next();
+  });
+  app.post('/api/internal/executions/claim', async (req, res) => {
+    res.json({ claim: await execution.claim(workerClaimSchema.parse(req.body).executionId) });
+  });
+  for (const action of ['heartbeat', 'output', 'finish'] as const) {
+    app.post(`/api/internal/executions/:id/${action}`, async (req, res) => {
+      const id = idSchema.parse(req.params.id);
+      if (action === 'output') {
+        const b = workerOutputSchema.parse(req.body);
+        res.json(await execution.update(id, b.attempt, b.chunk));
+      } else if (action === 'finish') {
+        const b = workerFinishSchema.parse(req.body);
+        res.json(await execution.update(id, b.attempt, undefined, b.result));
+      } else {
+        const b = workerLeaseSchema.parse(req.body);
+        res.json(await execution.update(id, b.attempt));
+      }
+    });
+  }
   app.use('/api', async (req, res, next) => {
     const value = req.cookies[cookieName];
     if (!value || typeof value !== 'string')
@@ -166,6 +215,35 @@ export function createApp(
     next();
   });
   const uid = (res: Response) => (res.locals.user as User).id;
+  let executionRequests = 0;
+  const executionReads = rateLimit({
+    windowMs: 60_000,
+    limit: 120,
+    keyGenerator: (_req, res) => uid(res),
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: {
+      error: { code: 'RATE_LIMITED', message: 'Too many execution requests. Retry shortly.' },
+    },
+  });
+  app.use('/api', (req, res, next) => {
+    if (!/^\/(?:executions(?:\/|$)|rooms\/[^/]+\/executions(?:\/|$))/.test(req.path)) return next();
+    if (executionRequests >= 4)
+      return next(
+        new ApiError(503, 'EXECUTION_BUSY', 'Execution requests are busy. Retry shortly.'),
+      );
+    executionRequests++;
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        executionRequests--;
+      }
+    };
+    res.once('finish', release);
+    res.once('close', release);
+    executionReads(req, res, next);
+  });
   const param = (req: Request, name: string) => idSchema.parse(req.params[name]);
   async function access(store: Store, roomId: string, userId: string, allowed: Role[]) {
     const [record] = await store
@@ -202,6 +280,32 @@ export function createApp(
     return file;
   }
   app.get('/api/auth/me', (_req, res) => res.json({ user: res.locals.user }));
+  app.get('/api/executions/health', async (_req, res) => res.json(await execution.health()));
+  app.post('/api/rooms/:roomId/executions', async (req, res) => {
+    res
+      .status(202)
+      .json({
+        execution: await execution.submit(
+          param(req, 'roomId'),
+          res.locals.user,
+          res.locals.sessionHash,
+          req.body,
+        ),
+      });
+  });
+  app.get('/api/rooms/:roomId/executions', async (req, res) =>
+    res.json(await execution.history(param(req, 'roomId'), uid(res), req.query)),
+  );
+  app.get('/api/rooms/:roomId/executions/:id', async (req, res) =>
+    res.json({ execution: await execution.get(param(req, 'roomId'), param(req, 'id'), uid(res)) }),
+  );
+  app.post('/api/rooms/:roomId/executions/:id/cancel', async (req, res) => {
+    if (req.body && Object.keys(req.body).length)
+      fail(400, 'VALIDATION_ERROR', 'Cancel takes no input.');
+    res.json({
+      execution: await execution.cancel(param(req, 'roomId'), param(req, 'id'), uid(res)),
+    });
+  });
   app.post('/api/realtime/ticket', async (_req, res) => {
     res.json(await realtime.ticket(res.locals.sessionHash));
   });
@@ -552,7 +656,9 @@ export function createApp(
       return res.status(dbError.status).json({
         error: { code: 'INVALID_BODY', message: 'Request body is invalid or too large.' },
       });
-    console.error(err);
+    console.error('API request failed', {
+      code: dbError.code ?? dbError.cause?.code ?? 'INTERNAL_ERROR',
+    });
     res.status(500).json({
       error: { code: 'INTERNAL_ERROR', message: 'Something went wrong. Please try again.' },
     });

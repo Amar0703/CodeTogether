@@ -137,6 +137,7 @@ export interface ClientEvents {
   'chat:send': (payload: z.infer<typeof chatSendSchema>, ack: Ack<ChatMessage>) => void;
 }
 export interface ServerEvents {
+  'execution:event': (event: ExecutionEvent) => void;
   'call:snapshot': (payload: CallSnapshot) => void;
   'call:signal': (payload: CallSignal) => void;
   'doc:update': (payload: { fileId: string; update: string }) => void;
@@ -248,3 +249,5 @@ export type IceConfiguration = {
   turnConfigured: boolean;
   expiresAt: string;
 };
+export * from './execution.js';
+import type { ExecutionEvent } from './execution.js';

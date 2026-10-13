@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@codetogether/contracts": "*",
     "drizzle-orm": "^0.45.3",
     "pg": "^8.16.0",
     "@electric-sql/pglite": "^0.3.10"

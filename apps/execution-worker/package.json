@@ -1,0 +1,25 @@
+{
+  "name": "@codetogether/execution-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "test:sandbox": "tsx --test test/sandbox.integration.ts"
+  },
+  "dependencies": {
+    "@codetogether/contracts": "*",
+    "@codetogether/execution": "*",
+    "bullmq": "^6.3.14",
+    "dockerode": "^5.0.1",
+    "dotenv": "^17.2.0",
+    "tsx": "^4.20.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.47"
+  }
+}
