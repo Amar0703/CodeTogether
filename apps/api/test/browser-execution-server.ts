@@ -6,24 +6,25 @@ import { connectDatabase, executions } from '@codetogether/db';
 import { createApp } from '../src/app.js';
 import { ExecutionService } from '../src/executions.js';
 import { Realtime } from '../src/realtime.js';
+import { executionFixture } from '../../../tests/execution-fixture-config.js';
 if (process.env.NODE_ENV === 'production') throw new Error('Test fixture prohibited in production');
 const connection = await connectDatabase();
 await connection.migrate();
-const realtime = new Realtime(connection.db, 'http://localhost:3000');
+const realtime = new Realtime(connection.db, executionFixture.webOrigin);
 const service = new ExecutionService(
   connection.db,
   async () => true,
   (e) => realtime.publishExecution(e),
 );
 const app = createApp(connection.db, {
-  origin: 'http://localhost:3000',
+  origin: executionFixture.webOrigin,
   realtime,
   executions: service,
   rateLimit: 1000,
 });
 const server = createServer(app);
 realtime.attach(server);
-server.listen(4000, '127.0.0.1');
+server.listen(executionFixture.apiPort, '127.0.0.1');
 let busy = false;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const timer = setInterval(async () => {

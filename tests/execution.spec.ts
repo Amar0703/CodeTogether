@@ -1,4 +1,5 @@
 import { test, expect, type Browser, type Page } from '@playwright/test';
+import { executionFixture } from './execution-fixture-config.js';
 test.use({
   launchOptions: {
     args: [
@@ -65,7 +66,7 @@ async function pair(browser: Browser) {
         }
       };
     });
-  const headers = { 'X-CodeTogether': '1', Origin: 'http://localhost:3000' };
+  const headers = { 'X-CodeTogether': '1', Origin: executionFixture.webOrigin };
   const identities = [];
   for (const [context, name] of [
     [a, 'Run Owner'],
@@ -109,12 +110,15 @@ async function audioBytes(page: Page) {
     return bytes;
   });
 }
-async function joinCall(owner: Page, viewer: Page) {
+async function joinParticipants(owner: Page, viewer: Page) {
   // This suite checks coexistence; the dedicated media suite tests simultaneous negotiation.
   for (const page of [owner, viewer]) {
     await page.getByRole('button', { name: 'Join call', exact: true }).click();
     await expect(page.getByTestId('call-status')).toHaveText('Connected');
   }
+}
+async function joinCall(owner: Page, viewer: Page) {
+  await joinParticipants(owner, viewer);
   for (const page of [owner, viewer]) {
     try {
       // Allow the existing bounded ICE recovery (15-second cycles) before testing coexistence.
@@ -166,7 +170,7 @@ async function joinCall(owner: Page, viewer: Page) {
     await expect.poll(() => audioBytes(page)).toBeGreaterThan(0);
   }
 }
-test('MOCK execution: two authenticated contexts receive output, viewer observes, chat/edit/call coexist and reload recovers', async ({
+test('MOCK execution: two authenticated contexts receive output, viewer observes, chat/edit coexist and reload recovers', async ({
   browser,
 }) => {
   const { a, b, owner, viewer, roomId, headers } = await pair(browser);
@@ -175,8 +179,6 @@ test('MOCK execution: two authenticated contexts receive output, viewer observes
     await owner.locator('.cm-content').fill('console.log("snapshot one");');
     await expect(owner.getByText('Saved', { exact: true })).toBeVisible();
     await owner.getByLabel('Execution stdin').fill('input');
-    await joinCall(owner, viewer);
-    const before = await audioBytes(viewer);
     await owner.getByRole('button', { name: 'Run', exact: true }).click();
     for (const page of [owner, viewer])
       await expect(page.getByLabel('Execution output')).toContainText('MOCK sandbox output');
@@ -187,7 +189,6 @@ test('MOCK execution: two authenticated contexts receive output, viewer observes
     await composer.fill('chat while execution runs');
     await owner.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(viewer.getByText('chat while execution runs', { exact: true })).toBeVisible();
-    await expect.poll(() => audioBytes(viewer)).toBeGreaterThan(before);
     await expect(viewer.getByTestId('execution-result')).toContainText('SUCCEEDED');
     expect(
       await viewer.evaluate(() => (window as unknown as { pwned?: boolean }).pwned),
@@ -226,7 +227,7 @@ test('MOCK execution panel preserves chat composer/call controls in desktop, mob
 }) => {
   const { a, b, owner, viewer } = await pair(browser);
   try {
-    await joinCall(owner, viewer);
+    await joinParticipants(owner, viewer);
     await owner.getByRole('button', { name: 'Run', exact: true }).click();
     await expect(owner.getByRole('button', { name: 'Cancel run' })).toBeVisible();
     await owner.getByRole('button', { name: 'Cancel run' }).click();
@@ -269,6 +270,24 @@ test('MOCK execution panel preserves chat composer/call controls in desktop, mob
         await owner.screenshot({ path: `test-results/execution-editor-${width}x${height}.png` });
       }
     }
+  } finally {
+    await a.close();
+    await b.close();
+  }
+});
+
+test('MOCK execution: real fake-device audio RTP continues during a run', async ({ browser }) => {
+  const { a, b, owner, viewer } = await pair(browser);
+  try {
+    await joinCall(owner, viewer);
+    const before = await Promise.all([audioBytes(owner), audioBytes(viewer)]);
+    await owner.getByRole('button', { name: 'Run', exact: true }).click();
+    for (const [index, page] of [owner, viewer].entries()) {
+      await expect(page.getByTestId('execution-result')).toContainText('RUNNING');
+      await expect(page.getByLabel('Execution output')).toContainText('MOCK sandbox output');
+      await expect.poll(() => audioBytes(page)).toBeGreaterThan(before[index]);
+    }
+    await expect(viewer.getByTestId('execution-result')).toContainText('SUCCEEDED');
   } finally {
     await a.close();
     await b.close();
