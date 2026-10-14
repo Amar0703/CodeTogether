@@ -157,6 +157,7 @@ for (const signal of ['SIGINT', 'SIGTERM'])
     void sandbox
       .close()
       .then(() => worker.close())
+      .catch(() => console.warn('Worker shutdown cleanup unavailable; janitor remains required'))
       .finally(() => {
         connection.disconnect();
         control.disconnect();

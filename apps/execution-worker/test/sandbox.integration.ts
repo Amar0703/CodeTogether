@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { once } from 'node:events';
 import Docker from 'dockerode';
 import { DockerSandbox, sandboxLabel } from '../src/sandbox.js';
 import type { ExecutionLanguage, OutputChunk } from '@codetogether/contracts';
@@ -24,6 +25,7 @@ async function run(
   source: string,
   stdin = '',
   controller = new AbortController(),
+  onOutput?: (chunk: OutputChunk) => void,
 ) {
   await sandbox.ready();
   const chunks: OutputChunk[] = [];
@@ -32,6 +34,7 @@ async function run(
     controller.signal,
     async (chunk) => {
       chunks.push(chunk);
+      onOutput?.(chunk);
     },
   );
   return { ...result, output: chunks.map((c) => c.text).join(''), chunks };
@@ -112,11 +115,21 @@ test(
   { skip: !enabled, timeout: 30000 },
   async () => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 500);
-    const result = await run('python', 'import time\ntime.sleep(100)', '', controller);
-    clearTimeout(timer);
+    let ready = false;
+    const result = await run(
+      'python',
+      'import subprocess,time\nsubprocess.Popen(["sleep","100"])\nprint("descendants-started",flush=True)\ntime.sleep(100)',
+      '',
+      controller,
+      (chunk) => {
+        if (chunk.text.includes('descendants-started')) {
+          ready = true;
+          controller.abort();
+        }
+      },
+    );
+    assert.ok(ready, 'cancel only after the isolated program starts a descendant');
     assert.equal(result.status, 'CANCELLED');
-    await sandbox.reap();
     assert.equal(
       (
         await sandbox.docker.listContainers({
@@ -133,6 +146,7 @@ test(
   'REAL sandbox: independent janitor cleans up after trusted worker SIGKILL',
   { skip: !enabled, timeout: 35000 },
   async () => {
+    const attempt = randomUUID();
     // Only trusted TypeScript infrastructure runs on the host. The Python fixture runs in Docker.
     const janitor = spawn(
       process.execPath,
@@ -147,26 +161,38 @@ test(
     );
     const worker = spawn(
       process.execPath,
-      ['--import', 'tsx', fileURLToPath(new URL('./orphan-fixture.ts', import.meta.url))],
-      { stdio: 'ignore' },
+      ['--import', 'tsx', fileURLToPath(new URL('./orphan-fixture.ts', import.meta.url)), attempt],
+      { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] },
     );
+    const workerExit = once(worker, 'exit');
+    const janitorExit = once(janitor, 'exit');
+    let ready = false;
+    worker.on('message', (message) => {
+      if ((message as { ready?: string }).ready === attempt) ready = true;
+    });
     const list = () =>
       sandbox.docker.listContainers({
         all: true,
-        filters: JSON.stringify({ label: [`${sandboxLabel}=v1`] }),
+        filters: JSON.stringify({
+          label: [`${sandboxLabel}=v1`],
+          name: [`^/ct-execution-${attempt}$`],
+        }),
       });
     try {
       const until = Date.now() + 10000;
       let running = false;
       while (Date.now() < until) {
-        if ((await list()).some((c) => c.State === 'running')) {
+        if (ready && (await list()).some((c) => c.State === 'running')) {
           running = true;
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      assert.ok(running, 'fixture must have started a real sandbox');
-      worker.kill('SIGKILL');
+      assert.ok(running, 'this fixture must start its own sandbox and descendant');
+      assert.ok(worker.kill('SIGKILL'));
+      const [, signal] = await workerExit;
+      assert.equal(signal, 'SIGKILL');
+      assert.equal((await list()).length, 1, 'sandbox must survive worker termination');
       const deadline = Date.now() + 21000;
       while ((await list()).length && Date.now() < deadline)
         await new Promise((resolve) => setTimeout(resolve, 200));
@@ -178,6 +204,7 @@ test(
     } finally {
       worker.kill('SIGKILL');
       janitor.kill('SIGKILL');
+      await Promise.allSettled([workerExit, janitorExit]);
       await sandbox.reap(true);
     }
   },

@@ -68,11 +68,35 @@ export function containerOptions(
 }
 export class DockerSandbox {
   private containers = new Set<Docker.Container>();
+  private removals = new Map<string, Promise<void>>();
   constructor(
     readonly docker: Docker,
     readonly image: string,
     readonly runtime: 'runsc' | 'runc',
   ) {}
+  private remove(container: Docker.Container): Promise<void> {
+    const existing = this.removals.get(container.id);
+    if (existing) return existing;
+    const removal = (async () => {
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        try {
+          await container.remove({ force: true, v: true });
+          return;
+        } catch (error) {
+          const status = (error as { statusCode?: number }).statusCode;
+          if (status === 404) return;
+          // An independent janitor may already be removing this container. A 409
+          // is not confirmation of cleanup; wait for removal/404, within a bound.
+          if (status !== 409 || Date.now() >= deadline)
+            throw new Error('Sandbox cleanup unavailable');
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+    })().finally(() => this.removals.delete(container.id));
+    this.removals.set(container.id, removal);
+    return removal;
+  }
   async ready() {
     const info = await this.docker.info();
     if (
@@ -94,18 +118,11 @@ export class DockerSandbox {
       filters: JSON.stringify({ label: [`${sandboxLabel}=v1`] }),
     })) {
       if (all || Number(info.Labels['io.codetogether.deadline'] ?? 0) < Date.now())
-        await this.docker
-          .getContainer(info.Id)
-          .remove({ force: true, v: true })
-          .catch((error: unknown) => {
-            if ((error as { statusCode?: number }).statusCode !== 404) throw error;
-          });
+        await this.remove(this.docker.getContainer(info.Id));
     }
   }
   async close() {
-    await Promise.all(
-      [...this.containers].map((c) => c.remove({ force: true, v: true }).catch(() => {})),
-    );
+    await Promise.all([...this.containers].map((c) => this.remove(c)));
   }
   async run(
     claim: WorkerClaim,
@@ -123,10 +140,12 @@ export class DockerSandbox {
     let truncated = false,
       timedOut = false;
     const remove = async () => {
-      if (container) await container.remove({ force: true, v: true }).catch(() => {});
+      if (container) await this.remove(container);
     };
-    const aborted = () => {
-      void remove();
+    const requestRemoval = () => {
+      // Event callbacks cannot await cleanup. The finally block must await the
+      // same removal promise and must not accept a concurrent 409 as success.
+      void remove().catch(() => {});
     };
     try {
       signal.throwIfAborted();
@@ -134,11 +153,11 @@ export class DockerSandbox {
         containerOptions(this.image, this.runtime, claim.attempt),
       );
       this.containers.add(container);
-      signal.addEventListener('abort', aborted, { once: true });
+      signal.addEventListener('abort', requestRemoval, { once: true });
       signal.throwIfAborted();
       timer = setTimeout(() => {
         timedOut = true;
-        void remove();
+        requestRemoval();
       }, L.sandboxMs);
       const stream = await container.attach({
         stream: true,
@@ -171,13 +190,13 @@ export class DockerSandbox {
         protocolBytes += data.length;
         if (protocolBytes > 600_000) {
           protocolError = true;
-          void remove();
+          requestRemoval();
           return;
         }
         buffer += data.toString('utf8');
         if (buffer.length > 100_000) {
           protocolError = true;
-          void remove();
+          requestRemoval();
           return;
         }
         let end: number;
@@ -193,7 +212,7 @@ export class DockerSandbox {
                 clearTimeout(phaseTimer);
                 phaseTimer = setTimeout(() => {
                   timedOut = true;
-                  void remove();
+                  requestRemoval();
                 }, L.runMs);
               }
               continue;
@@ -212,7 +231,7 @@ export class DockerSandbox {
             for (let text of splitOutput(packet.text.replaceAll('\0', '\uFFFD'))) {
               if (sequence >= L.chunks || bytes >= L.outputBytes) {
                 truncated = true;
-                void remove();
+                requestRemoval();
                 break;
               }
               if (Buffer.byteLength(text) > L.outputBytes - bytes) truncated = true;
@@ -226,12 +245,12 @@ export class DockerSandbox {
               });
               pending.catch(() => {
                 protocolError = true;
-                void remove();
+                requestRemoval();
               });
             }
           } catch {
             protocolError = true;
-            void remove();
+            requestRemoval();
           }
         }
       });
@@ -239,7 +258,7 @@ export class DockerSandbox {
       phaseTimer = setTimeout(
         () => {
           timedOut = true;
-          void remove();
+          requestRemoval();
         },
         runPhase ? L.runMs : L.compileMs,
       );
@@ -262,6 +281,7 @@ export class DockerSandbox {
           new Promise<void>((resolve) => setTimeout(resolve, 1000).unref()),
         ]);
       await pending;
+      signal.throwIfAborted();
       if (protocolError || !result) {
         const info = await container.inspect();
         return {
@@ -290,7 +310,7 @@ export class DockerSandbox {
     } finally {
       clearTimeout(timer);
       clearTimeout(phaseTimer);
-      signal.removeEventListener('abort', aborted);
+      signal.removeEventListener('abort', requestRemoval);
       await remove();
       if (container) this.containers.delete(container);
     }
