@@ -46,3 +46,25 @@ The existing same-origin ticket endpoint authenticates all collaboration. See [d
 ## Phase 4 calls
 
 `POST /api/rooms/:roomId/ice` returns authorized, temporary ICE configuration through the same-origin proxy. It requires session, CSRF checks and current room membership, is limited to 12 requests/user/minute, and uses private/no-store caching headers. TURN signing secrets remain on the API. See [call contracts](phase-4.md#contracts) for participation, cancellation, media state, SDP/ICE forwarding and snapshot events. Owners, editors and viewers may call; viewers still cannot mutate documents.
+
+## Phase 5 executions
+
+All browser execution endpoints require the existing session through the same-origin proxy, are no-store, and enforce current membership. Unsafe requests keep CSRF protection. Strict schemas/types are in `packages/contracts/src/execution.ts`; unknown fields (including spoofed identities) fail validation.
+
+| Method | Path                                                   | Contract                                                                               |
+| ------ | ------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| GET    | `/executions/health`                                   | `{available, limits}`; signed-in user                                                  |
+| POST   | `/rooms/:roomId/executions`                            | Owner/editor; `{fileId, idempotencyKey: UUID, language: 'javascript'                   | 'python' | 'cpp', version, sourceHash: lowercase SHA-256, stdin?}`; `202 {execution}` |
+| GET    | `/rooms/:roomId/executions?before=<sequence>&limit=10` | Members including viewers; descending sequence; limit 1–20; `{executions, nextCursor}` |
+| GET    | `/rooms/:roomId/executions/:id`                        | Members including viewers; `{execution}` with complete bounded persisted chunks        |
+| POST   | `/rooms/:roomId/executions/:id/cancel`                 | Submitter or room owner; no payload fields; idempotent `{execution}`                   |
+
+The API copies source from the saved file only after hash/version/language checks. Clients must confirm their visible Yjs replica is acknowledged before requesting Run. Result views expose snapshot hash/version/filename/language/submitter, status/failure, attempt/revision, creation/start/end times, duration/exit code, ordered `{sequence, stream, text}` chunks and truncation. They do not expose source, stdin or session hashes. Source/stdin are nevertheless retained privately for execution/diagnosis under the seven-day policy.
+
+Errors include `EXECUTION_UNAVAILABLE` (503), `EXECUTION_BUSY` (503), `EXECUTION_LIMIT` (429), `RATE_LIMITED` (429), `SNAPSHOT_CONFLICT` / `IDEMPOTENCY_CONFLICT` (409), `LANGUAGE_MISMATCH` / `SOURCE_LIMIT` (400), and existing validation/auth/access errors. Wait/retry overload, wait for Saved on a snapshot conflict, and preserve the idempotency key when retrying an uncertain submission. A deliberate new run uses a new key.
+
+The server emits `execution:event` only to authorized subscribed room sockets. Payload: `{roomId, executionId, attempt: UUID|null, revision, status, chunk?, truncated}`. Revisions and chunk sequences are monotonic per execution; duplicates/delays are possible. Delivery is volatile: discard older revisions, require contiguous chunk sequences and refetch durable detail on a gap/reconnect. No browser-to-server execution socket command or additional cookie forwarding is introduced.
+
+Worker-only paths under `/internal/executions` require `Authorization: Bearer <EXECUTION_WORKER_TOKEN>` and `X-CodeTogether: 1` for POST. `POST /ready` accepts `{}`; `POST /claim` accepts `{executionId}` and returns `{claim: null|{executionId,attempt,language,source,stdin}}`. `POST /:id/heartbeat`, `/output`, `/finish` accept `{attempt}`, `{attempt,chunk}`, `{attempt,result}` respectively, returning `{active}`. A stale attempt is 409; deleted work may be 404. `GET /metrics` returns sanitized retained status counts/oldest timestamps/readiness. These are trusted service endpoints, not a browser API; never expose the worker token to frontend code.
+
+See [Phase 5 policies, queue failure behavior and limits](phase-5.md). Execution status does not establish live TURN/call acceptance.

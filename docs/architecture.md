@@ -9,6 +9,10 @@ flowchart LR
   Browser -->|ticket-authenticated WebSocket| API
   API --> Contracts[Shared Zod contracts]
   API --> DB[(PostgreSQL)]
+  API -->|execution ID outbox| Redis[(BullMQ Redis)]
+  Redis --> Worker[Separate execution worker]
+  Worker -->|authenticated claim/output/result protocol| API
+  Worker --> Sandbox[Dedicated Docker + gVisor host]
 ```
 
 ## Durable state
@@ -29,7 +33,7 @@ Before collaborative initialization, HTTP saving conditionally updates a file by
 
 Node scrypt hashes passwords with a random salt; session and invite tokens use 32 cryptographically random bytes and SHA-256 hashes at rest. Production cookies use the `__Host-` prefix, Secure, HttpOnly, SameSite=Lax and a root path. Authentication errors do not disclose whether an account exists at login.
 
-All unsafe requests require `X-CodeTogether: 1`; an Origin header, when present, must exactly match `APP_ORIGIN`. Cross-origin CORS is not enabled. The custom header forces a preflight for cross-origin browser requests; the server does not permit that preflight. Authentication endpoints have a process-local rate limit. Distributed limits and expired-record cleanup are later hardening work.
+All unsafe requests require `X-CodeTogether: 1`; an Origin header, when present, must exactly match `APP_ORIGIN`. Cross-origin CORS is not enabled. The custom header forces a preflight for cross-origin browser requests; the server does not permit that preflight. Authentication endpoints have a process-local rate limit. Execution admissions have persistent database limits and seven-day cleanup; broad distributed application limits and unrelated expired-record cleanup remain later work. Forwarded IPs are ignored unless explicit verified ingress CIDRs are configured; execution limits use authenticated identities.
 
 ## Development database
 
@@ -58,3 +62,11 @@ Migration 0003 is additive. First open initializes one document under room/file 
 Native WebRTC uses a four-participant mesh with a separate participation identity for each tab. Typed call events reuse the authenticated Socket.IO connection and room queue; SDP/ICE never enter document state or the database. Every signal authorizes its source and destination against current session/membership and call IDs. Explicit join, perfect negotiation, bounded ICE restart, participation leases and cleanup isolate media failures from editing/chat.
 
 The same-origin API issues short-lived coturn-compatible credentials from a server-only secret. The relay is separate infrastructure; Vercel, Render and Neon retain their existing roles. Each participant uploads up to three media copies; larger rooms need an SFU. Signaling revocation cannot forcibly cut off malicious peers already connected to each other. See [Phase 4](phase-4.md) for contracts, bounds, expiry semantics, exact deployment settings and acceptance limits.
+
+## Execution
+
+Migration 0004 adds immutable execution snapshots, result chunks, an admission lock and revocation triggers. The execution row doubles as an outbox: PostgreSQL owns accepted work/results while Redis owns queue coordination. BullMQ can deliver duplicates; only a queued database row can be claimed, and UUID attempts/leases fence subsequent mutations. Unknown outcomes fail rather than rerunning user code. A two-second coordinator reconciles queue gaps, lease/queue expiry and retention.
+
+The API is the sole database owner, including PGlite development. The worker has Redis and a scoped HTTP protocol credential; it never opens the embedded directory. It submits fixed commands and source to isolated containers on a dedicated Linux Docker/gVisor host. Non-root/no-network/read-only/resource controls and an independent janitor bound sandbox behavior. Production refuses local runc and mutable image references. No execution fallback exists in the app processes.
+
+The existing ticket socket carries volatile execution events after persistence and per-recipient authorization. Reconnect/refetch recovers the bounded durable result. Run captures confirmed Yjs text and verifies its hash/version against the committed projection under room locks. Execution failures are separate from normal app health. See [Phase 5](phase-5.md) for the complete state/revocation policy, controls, residual risks, environment and deployment acceptance.

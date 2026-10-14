@@ -1,6 +1,6 @@
 # CodeTogether
 
-A shared coding workspace implementing Phases 1–4 of the project blueprint. Authenticated room members edit together with Yjs, use persistent chat and presence, and explicitly join small voice/video calls. Collaborative edits autosave after database acknowledgment and merge safely after reconnect. Remote-network calling requires configured TURN and deployment acceptance.
+A shared coding workspace implementing Phases 1–5 of the project blueprint. Authenticated room members edit together with Yjs, use persistent chat and presence, and explicitly join small voice/video calls. Collaborative edits autosave after database acknowledgment and merge safely after reconnect. Phase 5 adds optional asynchronous code execution through a separate isolated worker; it stays unavailable until its infrastructure is configured and verified. Remote-network calling requires configured TURN and deployment acceptance.
 
 ## Run locally
 
@@ -84,6 +84,15 @@ See [Phase 3 architecture, contracts, recovery guarantees and exact deployment s
 
 See [Phase 4 architecture, exact environment variables, TURN setup and deployment checklist](docs/phase-4.md). TURN is an additional external service; the existing Render web service is not a relay. No Phase 4 database migration is needed.
 
+## Phase 5 execution
+
+- Owners/editors run acknowledged immutable JavaScript, Python or C++ snapshots with stdin; viewers observe status/output/history.
+- Durable PostgreSQL outbox, idempotency, cancellation, persistent admission limits, attempt fencing and bounded output; Redis/BullMQ coordinates a separate worker.
+- Production adapter requires a dedicated Linux Docker/gVisor host and independent cleanup service. No submitted code runs in Express, Next.js or on the Windows host.
+- Execution is disabled by default. Redis/worker failures leave editing, chat and calls available. The API alone owns PGlite in local development.
+
+See [Phase 5 setup, security, deployment and verification](docs/phase-5.md). Real Redis/PostgreSQL/sandbox acceptance remains pending on suitable disposable infrastructure; mocked browser tests do not establish isolation.
+
 ## Commands and checks
 
 ```sh
@@ -93,6 +102,11 @@ npm test
 npm run build
 npx playwright install chromium
 npm run test:e2e
+npm run test:worker
+npm run test:execution:e2e
+# Explicit disposable infrastructure opt-ins are documented in docs/phase-5.md:
+npm run test:sandbox
+npm run test:execution:stack
 ```
 
 API tests use an isolated in-memory PostgreSQL runtime by default. Set `TEST_DATABASE_URL` to an **empty disposable PostgreSQL database** to use a real server; CI does this. Do not use an existing application database for tests. Browser tests create uniquely named accounts and a room in the local development database. Screenshots and failure traces go in `test-results/`.
@@ -102,13 +116,15 @@ API tests use an isolated in-memory PostgreSQL runtime by default. Set `TEST_DAT
 ```text
 apps/web          Next.js App Router, React, CodeMirror, responsive UI
 apps/api          Express API, authentication, authorization, validation
+apps/execution-worker Separate trusted worker and sandbox cleanup service
 packages/contracts Shared Zod validators and TypeScript response types
 packages/db       Drizzle schema, PostgreSQL/PGlite connections, SQL migration
-infra             Local PostgreSQL Docker Compose
+packages/execution BullMQ/Redis connection and queue configuration
+infra             PostgreSQL/Redis Compose, worker and sandbox images
 docs              Architecture, API reference, phase status and deployment
 tests             Two-browser-context acceptance test
 ```
 
 See [architecture](docs/architecture.md), [API](docs/api.md), [Phase 1 history](docs/phase-1.md), and [Phase 2 deployment and acceptance](docs/phase-2.md).
 
-Screen sharing, recording, transcription, SFUs, code execution, queues, AI, Git integration, multiple realtime instances and version-history browsing remain deferred. CRDT persistence preserves convergence, not a user-facing historical timeline.
+Screen sharing, recording, transcription, SFUs, AI, Git integration, multi-file builds, dependency installation, shared terminals, multiple realtime instances and version-history browsing remain deferred. CRDT persistence preserves convergence, not a user-facing historical timeline.
