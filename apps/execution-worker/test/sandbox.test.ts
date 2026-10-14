@@ -22,6 +22,11 @@ test('sandbox configuration has no infrastructure secrets, mounts, networks or p
   assert.ok(!JSON.stringify(options).includes('REDIS'));
   assert.ok(!JSON.stringify(options).includes('TOKEN'));
   assert.equal(options.HostConfig?.LogConfig?.Type, 'none');
+  const workMount = options.HostConfig?.Tmpfs?.['/work']?.split(',') ?? [];
+  assert.ok(workMount.includes('exec'), 'compiled C++ must run inside the bounded workspace');
+  assert.ok(workMount.includes('size=32m'));
+  assert.ok(workMount.includes('nosuid') && workMount.includes('nodev'));
+  assert.ok(options.HostConfig?.Tmpfs?.['/tmp']?.split(',').includes('noexec'));
 });
 test('UTF-8 output chunks stay within byte limits without splitting Unicode', () => {
   const text = '😀héllo'.repeat(5000);

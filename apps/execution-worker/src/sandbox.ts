@@ -50,7 +50,8 @@ export function containerOptions(
       OomKillDisable: false,
       Init: true,
       Tmpfs: {
-        '/work': 'rw,nosuid,nodev,size=32m,mode=1777',
+        // Docker defaults tmpfs to noexec. C++ must execute its compiled binary here.
+        '/work': 'rw,exec,nosuid,nodev,size=32m,mode=1777',
         '/tmp': 'rw,noexec,nosuid,nodev,size=8m,mode=1777',
       },
       ShmSize: 4 * 1024 * 1024,

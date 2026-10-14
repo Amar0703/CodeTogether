@@ -39,28 +39,41 @@ async function run(
 after(async () => {
   if (enabled) await sandbox.close();
 });
-test(
-  'REAL sandbox: JavaScript, Python and C++ with stdin/stdout/stderr',
-  { skip: !enabled, timeout: 90000 },
-  async () => {
-    for (const [language, source] of [
-      [
-        'javascript',
-        "process.stdout.write(require('fs').readFileSync(0,'utf8')); console.error('err')",
-      ],
-      ['python', "import sys\nprint(sys.stdin.read(),end='')\nprint('err',file=sys.stderr)"],
-      [
-        'cpp',
-        '#include <iostream>\n#include <string>\nint main(){std::string s;std::getline(std::cin,s);std::cout<<s;std::cerr<<"err";}',
-      ],
-    ] as const) {
+for (const [language, source] of [
+  [
+    'javascript',
+    "process.stdout.write(require('fs').readFileSync(0,'utf8')); console.error('err')",
+  ],
+  ['python', "import sys\nprint(sys.stdin.read(),end='')\nprint('err',file=sys.stderr)"],
+  [
+    'cpp',
+    '#include <iostream>\n#include <string>\nint main(){std::string s;std::getline(std::cin,s);std::cout<<s;std::cerr<<"err";}',
+  ],
+] as const) {
+  test(
+    `REAL sandbox: ${language} with stdin/stdout/stderr`,
+    { skip: !enabled, timeout: 30000 },
+    async () => {
       const r = await run(language, source, 'hello');
       assert.equal(r.status, 'SUCCEEDED', JSON.stringify(r));
-      assert.ok(r.output.includes('hello'));
-      assert.ok(r.chunks.some((c) => c.stream === 'stderr'));
-    }
-  },
-);
+      assert.equal(
+        r.chunks
+          .filter((c) => c.stream === 'stdout')
+          .map((c) => c.text)
+          .join(''),
+        'hello',
+      );
+      assert.equal(
+        r.chunks
+          .filter((c) => c.stream === 'stderr')
+          .map((c) => c.text)
+          .join('')
+          .trim(),
+        'err',
+      );
+    },
+  );
+}
 test(
   'REAL sandbox: deterministic errors, CPU timeout and output cap',
   { skip: !enabled, timeout: 90000 },
