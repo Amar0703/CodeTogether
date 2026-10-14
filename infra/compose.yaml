@@ -1,4 +1,68 @@
 services:
+  redis:
+    image: redis:8.2-alpine
+    command:
+      [
+        'redis-server',
+        '--appendonly',
+        'yes',
+        '--maxmemory',
+        '128mb',
+        '--maxmemory-policy',
+        'noeviction',
+      ]
+    ports: ['127.0.0.1:6379:6379']
+    volumes: ['redis_data:/data']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 2s
+      retries: 10
+  sandbox-image:
+    profiles: ['execution']
+    image: codetogether-sandbox:local
+    build: ./sandbox
+    entrypoint: ['/usr/bin/true']
+  execution-worker:
+    profiles: ['execution']
+    build:
+      context: ..
+      dockerfile: infra/execution-worker.Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      REDIS_URL: redis://redis:6379
+      EXECUTION_API_URL: http://host.docker.internal:4000
+      EXECUTION_WORKER_TOKEN: ${EXECUTION_WORKER_TOKEN:-}
+      SANDBOX_IMAGE: codetogether-sandbox:local
+      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-runsc}
+      SANDBOX_ALLOW_LOCAL_RUNC: ${SANDBOX_ALLOW_LOCAL_RUNC:-false}
+    extra_hosts: ['host.docker.internal:host-gateway']
+    volumes: ['/var/run/docker.sock:/var/run/docker.sock']
+    depends_on:
+      redis: { condition: service_healthy }
+      sandbox-image: { condition: service_completed_successfully }
+      execution-janitor: { condition: service_started }
+  execution-janitor:
+    profiles: ['execution']
+    build:
+      context: ..
+      dockerfile: infra/execution-worker.Dockerfile
+    command: ['node', '--import', 'tsx', 'apps/execution-worker/src/janitor.ts']
+    restart: unless-stopped
+    labels: { io.codetogether.watchdog: 'v1' }
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          'process.exit(Date.now()-Number(require("fs").readFileSync("/tmp/ct-janitor-alive","utf8"))<5000?0:1)',
+        ]
+      interval: 2s
+      timeout: 1s
+      retries: 2
+    volumes: ['/var/run/docker.sock:/var/run/docker.sock']
   postgres:
     image: postgres:17-alpine
     environment:
@@ -15,4 +79,5 @@ services:
       timeout: 5s
       retries: 10
 volumes:
+  redis_data:
   postgres_data:

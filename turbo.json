@@ -20,7 +20,11 @@
         "TURN_TTL_SECONDS",
         "ICE_TRANSPORT_POLICY",
         "METERED_DOMAIN",
-        "METERED_SECRET_KEY"
+        "METERED_SECRET_KEY",
+        "EXECUTION_ENABLED",
+        "REDIS_URL",
+        "EXECUTION_WORKER_TOKEN",
+        "TRUSTED_PROXY_CIDRS"
       ]
     },
     "build": {
@@ -29,6 +33,7 @@
       "env": ["API_URL", "NEXT_PUBLIC_REALTIME_URL"]
     },
     "@codetogether/api#build": { "outputs": [] },
+    "@codetogether/execution-worker#build": { "outputs": [] },
     "typecheck": { "dependsOn": ["^typecheck"] }
   }
 }

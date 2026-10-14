@@ -14,6 +14,7 @@
   "dependencies": {
     "@codetogether/contracts": "*",
     "@codetogether/db": "*",
+    "@codetogether/execution": "^0.1.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.0",
     "drizzle-orm": "^0.45.3",

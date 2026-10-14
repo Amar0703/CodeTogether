@@ -4,6 +4,12 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     services:
+      redis:
+        image: redis:8.2-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
       postgres:
         image: postgres:17-alpine
         env:
@@ -26,9 +32,25 @@ jobs:
       - run: npm test
         env:
           TEST_DATABASE_URL: postgresql://codetogether:codetogether@localhost:5432/codetogether_test
+          TEST_REDIS_URL: redis://localhost:6379
+      - run: npm run test:worker
+      - run: docker build -t codetogether-sandbox:local infra/sandbox
+      - run: npm run test:sandbox
+        env:
+          TEST_SANDBOX: disposable-local
+          TEST_SANDBOX_RUNTIME: runc
+      - run: docker compose -f infra/compose.yaml --profile execution up -d --build execution-janitor
+      - run: docker exec ${{ job.services.postgres.id }} createdb -U codetogether codetogether_stack
+      - run: npm run test:execution:stack
+        env:
+          TEST_EXECUTION_STACK: disposable-local
+          TEST_DATABASE_URL: postgresql://codetogether:codetogether@localhost:5432/codetogether_stack
+          TEST_REDIS_URL: redis://localhost:6379/1
+          TEST_SANDBOX_RUNTIME: runc
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+      - run: npm run test:execution:e2e
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

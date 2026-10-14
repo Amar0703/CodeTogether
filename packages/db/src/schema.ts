@@ -8,6 +8,8 @@ import {
   uniqueIndex,
   index,
   bigserial,
+  boolean,
+  jsonb,
 } from 'drizzle-orm/pg-core';
 
 const createdAt = () => timestamp('created_at', { withTimezone: true }).defaultNow().notNull();
@@ -109,3 +111,46 @@ export const messages = pgTable(
     uniqueIndex('messages_room_sequence_idx').on(t.roomId, t.sequence),
   ],
 );
+import type {
+  ExecutionLanguage,
+  ExecutionResult,
+  OutputChunk,
+  ExecutionView,
+} from '@codetogether/contracts';
+
+export const executionAdmission = pgTable('execution_admission', { id: integer().primaryKey() });
+export const executions = pgTable('executions', {
+  id: uuid().primaryKey(),
+  sequence: bigserial('sequence', { mode: 'bigint' }).notNull(),
+  roomId: uuid('room_id')
+    .notNull()
+    .references(() => rooms.id, { onDelete: 'cascade' }),
+  fileId: uuid('file_id').references(() => files.id, { onDelete: 'set null' }),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id),
+  submitter: text().notNull(),
+  sessionHash: text('session_hash').notNull(),
+  idempotencyKey: uuid('idempotency_key').notNull(),
+  fingerprint: text().notNull(),
+  filename: text().notNull(),
+  language: text().$type<ExecutionLanguage>().notNull(),
+  source: text().notNull(),
+  stdin: text().notNull(),
+  sourceHash: text('source_hash').notNull(),
+  version: integer().notNull(),
+  status: text().$type<ExecutionView['status']>().notNull().default('QUEUED'),
+  attempt: uuid(),
+  revision: integer().notNull().default(1),
+  chunks: jsonb().$type<OutputChunk[]>().notNull().default([]),
+  outputBytes: integer('output_bytes').notNull().default(0),
+  truncated: boolean().notNull().default(false),
+  failure: text().$type<ExecutionResult['failure']>(),
+  exitCode: integer('exit_code'),
+  durationMs: integer('duration_ms'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  startedAt: timestamp('started_at', { withTimezone: true }),
+  finishedAt: timestamp('finished_at', { withTimezone: true }),
+  leaseUntil: timestamp('lease_until', { withTimezone: true }),
+  dispatchedAt: timestamp('dispatched_at', { withTimezone: true }),
+});
