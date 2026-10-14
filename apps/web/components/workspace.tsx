@@ -28,6 +28,7 @@ import { Avatar, ErrorBanner, Loading, Modal } from './ui';
 import { useRoomRealtime } from '../lib/realtime';
 import { Chat } from './chat';
 import { CallPanel } from './call';
+import { ExecutionPanel } from './execution';
 import { DraftRecovery } from './recovery';
 import { CollaborativeDocument, type DocumentStatus } from '../lib/document';
 const Editor = dynamic(() => import('./editor'), { ssr: false, loading: () => <Loading /> });
@@ -558,6 +559,16 @@ export function Workspace({ id }: { id: string }) {
               </div>
             )}
           </div>
+          <ExecutionPanel
+            roomId={id}
+            file={latestActive ?? active}
+            document={document}
+            documentStatus={documentStatus}
+            role={detail.room.role}
+            accountId={accountId}
+            realtime={realtime}
+            removed={accessRemoved}
+          />
           <div className="editor-bottom">
             <span>
               <span className="status-dot" />

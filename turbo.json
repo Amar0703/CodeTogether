@@ -33,6 +33,7 @@
       "env": ["API_URL", "NEXT_PUBLIC_REALTIME_URL"]
     },
     "@codetogether/api#build": { "outputs": [] },
+    "@codetogether/execution-worker#build": { "outputs": [] },
     "typecheck": { "dependsOn": ["^typecheck"] }
   }
 }

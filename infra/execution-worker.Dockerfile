@@ -9,4 +9,4 @@ COPY tsconfig.base.json ./
 COPY packages/contracts packages/contracts
 COPY packages/execution packages/execution
 COPY apps/execution-worker apps/execution-worker
-CMD ["npm", "run", "start", "--workspace=@codetogether/execution-worker"]
+CMD ["node", "--import", "tsx", "apps/execution-worker/src/main.ts"]

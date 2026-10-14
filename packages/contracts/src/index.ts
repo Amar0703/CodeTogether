@@ -249,5 +249,5 @@ export type IceConfiguration = {
   turnConfigured: boolean;
   expiresAt: string;
 };
-export * from './execution.js';
-import type { ExecutionEvent } from './execution.js';
+export * from './execution';
+import type { ExecutionEvent } from './execution';

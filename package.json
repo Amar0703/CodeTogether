@@ -19,6 +19,10 @@
     "format:check": "prettier --check .",
     "test": "npm run test --workspace=@codetogether/api",
     "test:e2e": "playwright test",
+    "test:execution:e2e": "playwright test --config=playwright.execution.config.ts",
+    "test:worker": "npm run test --workspace=@codetogether/execution-worker",
+    "test:sandbox": "npm run test:sandbox --workspace=@codetogether/execution-worker",
+    "test:execution:stack": "npm exec --workspace=@codetogether/api -- tsx --test test/execution-stack.integration.test.ts",
     "db:migrate": "npm run db:migrate --workspace=@codetogether/api"
   },
   "devDependencies": {

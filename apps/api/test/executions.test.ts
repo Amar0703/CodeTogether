@@ -558,6 +558,11 @@ test('worker HTTP protocol validates attempts and payloads; socket output stops 
     await client
       .post(`/api/internal/executions/${r.id}/finish`)
       .set(auth)
+      .send({ attempt: c.attempt, result: { ...success, failure: 'COMPILE_ERROR' } })
+      .expect(400);
+    await client
+      .post(`/api/internal/executions/${r.id}/finish`)
+      .set(auth)
       .send({ attempt: c.attempt, result: success })
       .expect(200);
     await client

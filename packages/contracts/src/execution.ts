@@ -89,7 +89,13 @@ export const executionResultSchema = z
     durationMs: z.number().int().min(0).max(60_000),
     truncated: z.boolean(),
   })
-  .strict();
+  .strict()
+  .refine((r) => {
+    if (r.status === 'SUCCEEDED') return r.failure === null && r.exitCode === 0 && !r.truncated;
+    if (r.status === 'TIMED_OUT') return r.failure === 'RESOURCE_LIMIT';
+    if (r.status === 'CANCELLED') return r.failure === 'USER_CANCELLED' || r.failure === 'REVOKED';
+    return r.failure !== null && !['USER_CANCELLED', 'REVOKED'].includes(r.failure);
+  }, 'Terminal status, failure and exit information must agree');
 export type ExecutionResult = z.infer<typeof executionResultSchema>;
 export const workerClaimSchema = z.object({ executionId: z.uuid() }).strict();
 export const workerLeaseSchema = z.object({ attempt: z.uuid() }).strict();

@@ -271,6 +271,8 @@ export class DockerSandbox {
           truncated,
         };
       }
+      if (truncated && result.status === 'SUCCEEDED')
+        return { ...result, status: 'FAILED', failure: 'RESOURCE_LIMIT', truncated: true };
       return { ...result, truncated: result.truncated || truncated };
     } catch {
       return {

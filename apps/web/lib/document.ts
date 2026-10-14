@@ -272,6 +272,20 @@ export class CollaborativeDocument {
     normalized.destroy();
     return same;
   }
+  confirmedSource() {
+    if (
+      this.disposed ||
+      this.blocked ||
+      !this.joined ||
+      !this.socket?.connected ||
+      this.writing ||
+      !this.isDurable()
+    )
+      throw new Error(
+        'Wait for Saved while connected before running. Offline drafts are not executed.',
+      );
+    return this.text.toString();
+  }
   private remote = (data: { fileId: string; update: string }) => {
     if (data.fileId !== this.fileId || this.blocked) return;
     Y.applyUpdate(this.doc, decode(data.update), 'server');
